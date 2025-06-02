@@ -9,7 +9,7 @@
 #include <string.h>
 
 #define DCMV_MAGIC "DCMV"
-#define VIDEO_FILE "/pc/movie.dcmv"
+#define VIDEO_FILE "/cd/movie.dcmv"
 
 static FILE *fp = NULL, *audio_fp = NULL;
 static uint8_t *frame_buffer = NULL, *compressed_buffer = NULL;
@@ -120,6 +120,24 @@ static int init_pvr(void) {
                      PVR_TXRFMT_RGB565 | PVR_TXRFMT_TWIDDLED | PVR_TXRFMT_VQ_ENABLE,
                      video_width, video_height, pvr_txr, PVR_FILTER_BILINEAR);
     pvr_poly_compile(&hdr, &cxt);
+
+    // /* Set SQ to YUV converter. */
+    // PVR_SET(PVR_YUV_ADDR, (((unsigned int)pvr_txr) & 0xffffff));
+    // /* Divide PVR texture width and texture height by 16 and subtract 1. */
+    // PVR_SET(PVR_YUV_CFG, (0x01 << 24) | /* Set bit to specify 422 data format */
+    //                      (((video_height / 16) - 1) << 8) | 
+    //                      ((video_width / 16) - 1));
+    // /* Need to read once. */
+    // PVR_GET(PVR_YUV_CFG);
+
+    // pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY, 
+    //                 PVR_TXRFMT_YUV422 | PVR_TXRFMT_NONTWIDDLED, 
+    //                 video_width, video_height, 
+    //                 pvr_txr, 
+    //                 PVR_FILTER_BILINEAR);
+    // pvr_poly_compile(&hdr, &cxt);
+
+    // hdr.mode3 |= PVR_TXRFMT_STRIDE;    
 
     vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=0, .z=1, .u=0, .v=0, .argb=0xffffffff};
     vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=640, .y=0, .z=1, .u=1, .v=0, .argb=0xffffffff};
