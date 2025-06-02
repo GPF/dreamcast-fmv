@@ -12,7 +12,7 @@ CHANNELS=1
 DCACONV="./dcaconv" # https://github.com/TapamN/dcaconv
 PVRTX="/opt/toolchains/dc/kos/utils/pvrtex/pvrtex"
 PACKER="./pack_dcmv"
-EXT="tex"  # can also be dt or pvr
+EXT="dt"  # can also be tex or pvr
 
 # Prepare folders
 mkdir -p "$OUTPUT_DIR"
@@ -30,7 +30,7 @@ echo "🎞️ Converting PNG frames to .${EXT} with VQ compression..."
 frame_idx=0
 for png in "$TEMP_DIR"/frame*.png; do
   base=$(printf "frame%04d" "$frame_idx")
-  "$PVRTX" -i "$png" -o "$OUTPUT_DIR/${base}.${EXT}" -f RGB565 -c small || exit 1
+  "$PVRTX" -i "$png" -o "$OUTPUT_DIR/${base}.${EXT}" -f RGB565 -c small --dither 1 || exit 1
   ((frame_idx++))
 done
 

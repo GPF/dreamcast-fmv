@@ -79,7 +79,10 @@ int main(int argc, char **argv) {
     fclose(first_fp);
 
     uint32_t skip = 0;
-    if (memcmp(raw_buf, "DcTx", 4) == 0) skip = 0x80;
+    if (memcmp(raw_buf, "DcTx", 4) == 0) {
+        uint8_t header_size = raw_buf[9];  // byte 5 = header_size
+        skip = (header_size + 1) * 32;
+    }
     else if (memcmp(raw_buf, "DTEX", 4) == 0) skip = 0x10;
     else if (memcmp(raw_buf, "PVRT", 4) == 0) skip = 0x10;
     else {
