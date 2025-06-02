@@ -1,2 +1,68 @@
-# dreamcast-fmv
-Zlib-compressed FMV movie format and player for Sega Dreamcast
+Dreamcast FMV Player
+
+This is a proof-of-concept FMV (Full Motion Video) playback toolchain for the Sega Dreamcast.
+It includes:
+
+pack_dcmv: a frame+audio packer using zlib (raw DEFLATE) compression
+
+fmv_play.elf: a Dreamcast player that decompresses and displays the video while streaming synced ADPCM audio
+
+conversion tools using ffmpeg + pvrtex + dcaconv
+
+Goals
+
+Minimize CPU usage on Dreamcast by pre-processing all video/audio data
+
+Leverage hardware VQ-compressed textures and sound streaming for smooth playback
+
+Project Structure
+
+.
+├── convert_to_pvr_fmv.sh       # Main conversion script (edit manually to configure input)
+├── dcaconv                     # ADPCM encoder (built from TapamN's dcaconv repo)
+├── pack_dcmv.c                 # Source for video+audio packer
+├── pack_dcmv                  # Compiled binary (use: `gcc -O2 pack_dcmv.c -o pack_dcmv -lz`)
+├── input/
+│   └── Your source .mp4 files (manually configured in convert_to_pvr_fmv.sh)
+├── playdcmv/
+│   ├── fmv_play.c             # Dreamcast playback code (uses zlib, PVR, snd_stream)
+│   ├── fmv_play.elf           # Compiled player binary
+│   ├── movie.dcmv             # Final Dreamcast FMV file
+│   └── audio.dca              # ADPCM audio extracted from source
+└── readme.txt (legacy, can be deleted)
+
+Dependencies
+
+ffmpeg: used to extract YUV frames and audio from MP4
+
+pvrtex: builds VQ-compressed RGB565 Dreamcast textures (from KOS utils folder)
+
+dcaconv: encodes WAV audio to Dreamcast ADPCM format (https://github.com/TapamN/dcaconv)
+
+zlib: used for raw DEFLATE compression
+
+Usage
+
+Edit convert_to_pvr_fmv.sh:
+
+Set the input video path (e.g., input/Dreamcast Startup (60fps).mp4)
+
+Adjust parameters like width, height, FPS, sample rate, channels, and audio bitrate
+
+Run the script:
+
+./convert_to_pvr_fmv.sh
+
+Burn the resulting movie.dcmv + fmv_play.elf (or dcmv.cdi) to a disc or run with an emulator like Flycast or on real hardware.
+
+License
+
+This project is for educational/demo purposes. See individual tools for respective licenses.
+
+Author
+
+Troy E. Davis (@GPF) – Dreamcast homebrew hacker, QA engineer, and SDL3 port contributor.
+
+🎥 Screenshots and sample clips coming soon!
+
+Feel free to fork, test on hardware, or suggest features.
