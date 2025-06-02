@@ -62,4 +62,16 @@ Troy E. Davis ([@GPF](https://github.com/GPF)) – Dreamcast homebrew hacker, QA
 
 🎥 Screenshots and sample clips coming soon!
 
+![image](https://github.com/user-attachments/assets/6e24fbb8-2f86-4c95-a097-b26e14f6b521)
+
+
+https://github.com/user-attachments/assets/60b07856-052f-4854-9005-18eb9ce9aa38
+
+
+https://github.com/user-attachments/assets/54731601-5f5e-420a-be52-f8ba33d16adc
+
+
+https://github.com/user-attachments/assets/5ef68680-6b25-4d52-a357-63b1aa6d9c12
+
+
 Feel free to fork, test on hardware, or suggest features.
