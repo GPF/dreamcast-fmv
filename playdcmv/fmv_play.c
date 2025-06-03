@@ -3,7 +3,7 @@
 #include <dc/sound/sound.h>
 #include <dc/pvr.h>
 #include <dc/maple/controller.h>
-#include <zstd.h>
+#include <zstd/zstd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
