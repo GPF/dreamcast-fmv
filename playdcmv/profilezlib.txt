@@ -1,0 +1,330 @@
+Flat profile:
+
+Each sample counts as 0.1 seconds.
+  %   cumulative   self              self     total           
+ time   seconds   seconds    calls  ms/call  ms/call  name    
+ 37.18     10.30    10.30      619    16.64    16.64  _inflate_fast
+ 13.00     13.90     3.60      138    26.09    35.56  _snd_stream_poll
+  8.30     16.20     2.30      186    12.37    12.37  ___sdivsi3_i4i
+  6.86     18.10     1.90                             _main
+  5.60     19.65     1.55      104    14.90    14.90  _maple_dev_status
+  5.05     21.05     1.40       16    87.50    87.50  _inflate_table
+  3.25     21.95     0.90                             _inflate
+  2.71     22.70     0.75       47    15.96    15.96  _maple_enum_type
+  2.53     23.40     0.70       63    11.11    11.11  ___udivsi3_i4i
+  1.81     23.90     0.50                             __fseeko_r
+  1.44     24.30     0.40                             L_al4src
+  1.35     24.68     0.38                             L_2l_loop
+  1.26     25.02     0.35                             _irq_disable
+  1.08     25.32     0.30                             _dcache_flush_range
+  0.90     25.57     0.25                             L_al4both_loop
+  0.72     25.77     0.20     2073     0.10     0.10  _dcload_read
+  0.72     25.98     0.20        3    66.67    66.67  _fs_read
+  0.72     26.18     0.20                             ___sread
+  0.72     26.38     0.20                             _sq_set32
+  0.54     26.52     0.15       18     8.33     8.33  _g2_read_32
+  0.36     26.62     0.10        1   100.00   100.00  ___newlib_lock_acquire_recursive
+  0.36     26.73     0.10        1   100.00   100.00  ___srefill_r
+  0.36     26.82     0.10        1   100.00   100.00  _fREe
+  0.36     26.93     0.10        1   100.00   100.00  _mALLOc
+  0.36     27.02     0.10        1   100.00   100.00  _spu_memset_sq
+  0.36     27.12     0.10        1   100.00   100.00  _timer_spin_sleep
+  0.36     27.23     0.10                             L_al4dst
+  0.36     27.32     0.10                             __fread_r
+  0.36     27.43     0.10                             _genwait_wait
+  0.27     27.50     0.07                             L_al4both
+  0.18     27.55     0.05       43     1.16     1.16  _sbrk
+  0.18     27.60     0.05                             _g2_write_16
+  0.18     27.65     0.05                             _memcpy
+  0.18     27.70     0.05                             _vma_table_600
+  0.00     27.70     0.00       23     0.00     0.00  _elf_free
+  0.00     27.70     0.00        6     0.00     0.00  _htonl
+
+ %         the percentage of the total running time of the
+time       program used by this function.
+
+cumulative a running sum of the number of seconds accounted
+ seconds   for by this function and those listed above it.
+
+ self      the number of seconds accounted for by this
+seconds    function alone.  This is the major sort for this
+           listing.
+
+calls      the number of times this function was invoked, if
+           this function is profiled, else blank.
+
+ self      the average number of milliseconds spent in this
+ms/call    function per call, if this function is profiled,
+	   else blank.
+
+ total     the average number of milliseconds spent in this
+ms/call    function and its descendents per call, if this
+	   function is profiled, else blank.
+
+name       the name of the function.  This is the minor sort
+           for this listing. The index shows the location of
+	   the function in the gprof listing. If the index is
+	   in parenthesis it shows where it would appear in
+	   the gprof listing if it were to be printed.
+
+Copyright (C) 2012-2023 Free Software Foundation, Inc.
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.
+
+		     Call graph (explanation follows)
+
+
+granularity: each sample hit covers 8 byte(s) for 0.36% of 27.70 seconds
+
+index % time    self  children    called     name
+                                   9             _inflate [1]
+[1]     45.5    0.90   11.70       0+9       _inflate [1]
+               10.30    0.00     619/619         _inflate_fast [3]
+                1.40    0.00      16/16          _inflate_table [7]
+                                   9             _inflate [1]
+-----------------------------------------------
+                                 454             _main [2]
+[2]     39.5    1.90    9.05       0+454     _main [2]
+                3.60    1.31     138/138         _snd_stream_poll [4]
+                1.84    0.00     149/186         ___sdivsi3_i4i [5]
+                1.55    0.00     104/104         _maple_dev_status [6]
+                0.75    0.00      47/47          _maple_enum_type [8]
+                                 454             _main [2]
+-----------------------------------------------
+               10.30    0.00     619/619         _inflate [1]
+[3]     37.2   10.30    0.00     619         _inflate_fast [3]
+-----------------------------------------------
+                                1941             _snd_stream_poll [4]
+                3.60    1.31     138/138         _main [2]
+[4]     17.7    3.60    1.31     138+1941    _snd_stream_poll [4]
+                0.70    0.00      63/63          ___udivsi3_i4i [9]
+                0.46    0.00      37/186         ___sdivsi3_i4i [5]
+                0.15    0.00      18/18          _g2_read_32 [22]
+                                1941             _snd_stream_poll [4]
+-----------------------------------------------
+                0.46    0.00      37/186         _snd_stream_poll [4]
+                1.84    0.00     149/186         _main [2]
+[5]      8.3    2.30    0.00     186         ___sdivsi3_i4i [5]
+-----------------------------------------------
+                1.55    0.00     104/104         _main [2]
+[6]      5.6    1.55    0.00     104         _maple_dev_status [6]
+-----------------------------------------------
+                1.40    0.00      16/16          _inflate [1]
+[7]      5.1    1.40    0.00      16         _inflate_table [7]
+-----------------------------------------------
+                0.75    0.00      47/47          _main [2]
+[8]      2.7    0.75    0.00      47         _maple_enum_type [8]
+-----------------------------------------------
+                0.70    0.00      63/63          _snd_stream_poll [4]
+[9]      2.5    0.70    0.00      63         ___udivsi3_i4i [9]
+-----------------------------------------------
+                                  16             ___sread [10]
+[10]     2.2    0.20    0.40       0+16      ___sread [10]
+                0.20    0.00    2073/2073        _dcload_read [18]
+                0.20    0.00       3/3           _fs_read [19]
+                                  16             ___sread [10]
+-----------------------------------------------
+                                   6             __fseeko_r [11]
+[11]     2.2    0.50    0.10       0+6       __fseeko_r [11]
+                0.10    0.00       1/1           ___newlib_lock_acquire_recursive [24]
+                                   6             __fseeko_r [11]
+-----------------------------------------------
+                                                 <spontaneous>
+[12]     1.4    0.40    0.00                 L_al4src [12]
+-----------------------------------------------
+                                                 <spontaneous>
+[13]     1.4    0.38    0.00                 L_2l_loop [13]
+-----------------------------------------------
+                                                 <spontaneous>
+[14]     1.3    0.35    0.00                 _irq_disable [14]
+-----------------------------------------------
+                                                 <spontaneous>
+[15]     1.1    0.30    0.00                 _dcache_flush_range [15]
+-----------------------------------------------
+                                                 <spontaneous>
+[16]     0.9    0.25    0.00                 L_al4both_loop [16]
+-----------------------------------------------
+                                   1             __fread_r [17]
+[17]     0.9    0.10    0.15       0+1       __fread_r [17]
+                0.10    0.00       1/1           ___srefill_r [25]
+                0.05    0.00      43/43          _sbrk [34]
+                                   1             __fread_r [17]
+-----------------------------------------------
+                0.20    0.00    2073/2073        ___sread [10]
+[18]     0.7    0.20    0.00    2073         _dcload_read [18]
+-----------------------------------------------
+                0.20    0.00       3/3           ___sread [10]
+[19]     0.7    0.20    0.00       3         _fs_read [19]
+-----------------------------------------------
+                                                 <spontaneous>
+[20]     0.7    0.00    0.20                 _snd_init [20]
+                0.10    0.00       1/1           _spu_memset_sq [28]
+                0.10    0.00       1/1           _timer_spin_sleep [29]
+-----------------------------------------------
+                                  10             _sq_set32 [21]
+[21]     0.7    0.20    0.00       0+10      _sq_set32 [21]
+                                  10             _sq_set32 [21]
+-----------------------------------------------
+                0.15    0.00      18/18          _snd_stream_poll [4]
+[22]     0.5    0.15    0.00      18         _g2_read_32 [22]
+                0.00    0.00      23/23          _elf_free [125]
+-----------------------------------------------
+                                                 <spontaneous>
+[23]     0.4    0.10    0.00                 L_al4dst [23]
+-----------------------------------------------
+                0.10    0.00       1/1           __fseeko_r [11]
+[24]     0.4    0.10    0.00       1         ___newlib_lock_acquire_recursive [24]
+-----------------------------------------------
+                0.10    0.00       1/1           __fread_r [17]
+[25]     0.4    0.10    0.00       1         ___srefill_r [25]
+-----------------------------------------------
+                0.10    0.00       1/1           _free [30]
+[26]     0.4    0.10    0.00       1         _fREe [26]
+-----------------------------------------------
+                0.10    0.00       1/1           _malloc [32]
+[27]     0.4    0.10    0.00       1         _mALLOc [27]
+-----------------------------------------------
+                0.10    0.00       1/1           _snd_init [20]
+[28]     0.4    0.10    0.00       1         _spu_memset_sq [28]
+-----------------------------------------------
+                0.10    0.00       1/1           _snd_init [20]
+[29]     0.4    0.10    0.00       1         _timer_spin_sleep [29]
+-----------------------------------------------
+                                                 <spontaneous>
+[30]     0.4    0.00    0.10                 _free [30]
+                0.10    0.00       1/1           _fREe [26]
+-----------------------------------------------
+                                 151             _genwait_wait [31]
+[31]     0.4    0.10    0.00       0+151     _genwait_wait [31]
+                                 151             _genwait_wait [31]
+-----------------------------------------------
+                                                 <spontaneous>
+[32]     0.4    0.00    0.10                 _malloc [32]
+                0.10    0.00       1/1           _mALLOc [27]
+-----------------------------------------------
+                                                 <spontaneous>
+[33]     0.3    0.07    0.00                 L_al4both [33]
+-----------------------------------------------
+                0.05    0.00      43/43          __fread_r [17]
+[34]     0.2    0.05    0.00      43         _sbrk [34]
+-----------------------------------------------
+                                                 <spontaneous>
+[35]     0.2    0.05    0.00                 _g2_write_16 [35]
+-----------------------------------------------
+                                                 <spontaneous>
+[36]     0.2    0.05    0.00                 _memcpy [36]
+-----------------------------------------------
+                                                 <spontaneous>
+[37]     0.2    0.05    0.00                 _vma_table_600 [37]
+-----------------------------------------------
+                0.00    0.00      23/23          _g2_read_32 [22]
+[125]    0.0    0.00    0.00      23         _elf_free [125]
+-----------------------------------------------
+                0.00    0.00       6/6           _dma_map_src [449]
+[126]    0.0    0.00    0.00       6         _htonl [126]
+-----------------------------------------------
+
+ This table describes the call tree of the program, and was sorted by
+ the total amount of time spent in each function and its children.
+
+ Each entry in this table consists of several lines.  The line with the
+ index number at the left hand margin lists the current function.
+ The lines above it list the functions that called this function,
+ and the lines below it list the functions this one called.
+ This line lists:
+     index	A unique number given to each element of the table.
+		Index numbers are sorted numerically.
+		The index number is printed next to every function name so
+		it is easier to look up where the function is in the table.
+
+     % time	This is the percentage of the `total' time that was spent
+		in this function and its children.  Note that due to
+		different viewpoints, functions excluded by options, etc,
+		these numbers will NOT add up to 100%.
+
+     self	This is the total amount of time spent in this function.
+
+     children	This is the total amount of time propagated into this
+		function by its children.
+
+     called	This is the number of times the function was called.
+		If the function called itself recursively, the number
+		only includes non-recursive calls, and is followed by
+		a `+' and the number of recursive calls.
+
+     name	The name of the current function.  The index number is
+		printed after it.  If the function is a member of a
+		cycle, the cycle number is printed between the
+		function's name and the index number.
+
+
+ For the function's parents, the fields have the following meanings:
+
+     self	This is the amount of time that was propagated directly
+		from the function into this parent.
+
+     children	This is the amount of time that was propagated from
+		the function's children into this parent.
+
+     called	This is the number of times this parent called the
+		function `/' the total number of times the function
+		was called.  Recursive calls to the function are not
+		included in the number after the `/'.
+
+     name	This is the name of the parent.  The parent's index
+		number is printed after it.  If the parent is a
+		member of a cycle, the cycle number is printed between
+		the name and the index number.
+
+ If the parents of the function cannot be determined, the word
+ `<spontaneous>' is printed in the `name' field, and all the other
+ fields are blank.
+
+ For the function's children, the fields have the following meanings:
+
+     self	This is the amount of time that was propagated directly
+		from the child into the function.
+
+     children	This is the amount of time that was propagated from the
+		child's children to the function.
+
+     called	This is the number of times the function called
+		this child `/' the total number of times the child
+		was called.  Recursive calls by the child are not
+		listed in the number after the `/'.
+
+     name	This is the name of the child.  The child's index
+		number is printed after it.  If the child is a
+		member of a cycle, the cycle number is printed
+		between the name and the index number.
+
+ If there are any cycles (circles) in the call graph, there is an
+ entry for the cycle-as-a-whole.  This entry shows who called the
+ cycle (as parents) and the members of the cycle (as children.)
+ The `+' recursive calls entry shows the number of function calls that
+ were internal to the cycle, and the calls entry for each member shows,
+ for that member, how many times it was called from other members of
+ the cycle.
+
+Copyright (C) 2012-2023 Free Software Foundation, Inc.
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.
+
+Index by function name
+
+  [13] L_2l_loop              [15] _dcache_flush_range    [14] _irq_disable
+  [33] L_al4both              [18] _dcload_read (fs_dcload.c) [27] _mALLOc (malloc.c)
+  [16] L_al4both_loop        [125] _elf_free               [2] _main
+  [23] L_al4dst               [26] _fREe (malloc.c)        [6] _maple_dev_status
+  [12] L_al4src               [19] _fs_read                [8] _maple_enum_type
+  [24] ___newlib_lock_acquire_recursive [22] _g2_read_32  [36] _memcpy
+   [5] ___sdivsi3_i4i         [35] _g2_write_16           [34] _sbrk
+  [10] ___sread               [31] _genwait_wait           [4] _snd_stream_poll
+  [25] ___srefill_r          [126] _htonl                 [28] _spu_memset_sq
+   [9] ___udivsi3_i4i          [1] _inflate               [21] _sq_set32
+  [17] __fread_r               [3] _inflate_fast          [29] _timer_spin_sleep
+  [11] __fseeko_r              [7] _inflate_table         [37] _vma_table_600

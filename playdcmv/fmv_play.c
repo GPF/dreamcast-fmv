@@ -7,9 +7,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "profiler.h"
 
 #define DCMV_MAGIC "DCMV"
-#define VIDEO_FILE "/cd/movie.dcmv"
+#define VIDEO_FILE "/pc/movie.dcmv"
 
 static FILE *fp = NULL, *audio_fp = NULL;
 static uint8_t *frame_buffer = NULL, *compressed_buffer = NULL;
@@ -165,13 +166,18 @@ static void wait_exit(void) {
             if (state->buttons & CONT_A) {
                 sprintf(screenshotfilename, "/pc/screenshot%d.ppm", frame_index);
                 vid_screen_shot(screenshotfilename);
-            } else if (state->buttons)
+            } else if (state->buttons){
+                profiler_stop();
+                profiler_clean_up();
                 arch_exit();
+            }
         }
     }
 }
 
 int main(void) {
+    profiler_init("/pc/gmon.out");
+    profiler_start();    
     fp = fopen(VIDEO_FILE, "rb");
     if (!fp || load_header() < 0) return -1;
 
@@ -215,6 +221,8 @@ int main(void) {
         wait_exit();
     }
 
+    profiler_stop();
+    profiler_clean_up();    
     snd_stream_stop(stream);
     snd_stream_destroy(stream);
     pvr_mem_free(pvr_txr);
