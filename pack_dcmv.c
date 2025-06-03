@@ -1,10 +1,10 @@
-// pack_dcmv.c - builds Dreamcast .dcmv container with raw DEFLATE-compressed frames from .dt/.tex/.pvr textures
+// pack_dcmv.c - builds Dreamcast .dcmv container with raw Zstandard-compressed frames from .dt/.tex/.pvr textures
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <errno.h>
-#include <zlib.h>
+#include <zstd.h>  // Zstandard
 
 #define MAX_FRAMES 10000
 #define FRAME_FILENAME_MAX 256
@@ -56,7 +56,7 @@ int main(int argc, char **argv) {
         rewind(audio_fp);  // Raw ADPCM, no header
     }
 
-    // Now get the real size
+    // Get audio size
     fseek(audio_fp, 0, SEEK_END);
     long audio_size = ftell(audio_fp);
     fseek(audio_fp, 0, SEEK_SET);
@@ -92,12 +92,11 @@ int main(int argc, char **argv) {
 
     uint32_t skip = 0;
     if (memcmp(raw_buf, "DcTx", 4) == 0) {
-        uint8_t header_size = raw_buf[9];  // byte 9 = header_size
+        uint8_t header_size = raw_buf[9];
         skip = (header_size + 1) * 32;
-    }
-    else if (memcmp(raw_buf, "DTEX", 4) == 0) skip = 0x10;
-    else if (memcmp(raw_buf, "PVRT", 4) == 0) skip = 0x10;
-    else {
+    } else if (memcmp(raw_buf, "DTEX", 4) == 0 || memcmp(raw_buf, "PVRT", 4) == 0) {
+        skip = 0x10;
+    } else {
         fprintf(stderr, "Unknown texture format in frame 0\n");
         return 1;
     }
@@ -119,7 +118,7 @@ int main(int argc, char **argv) {
     }
 
     long offset_index_pos = ftell(out);
-    fseek(out, frame_count * sizeof(uint32_t), SEEK_CUR);
+    fseek(out, frame_count * sizeof(uint32_t), SEEK_CUR);  // reserve space for offset table
 
     for (int i = 0; i < frame_count; ++i) {
         snprintf(filename, sizeof(filename), frame_pattern, i);
@@ -134,35 +133,22 @@ int main(int argc, char **argv) {
 
         uint8_t *src = raw_buf + skip;
 
-        z_stream zs = {0};
-        uLongf bound = compressBound(src_len);
+        size_t bound = ZSTD_compressBound(src_len);
         uint8_t *comp = malloc(bound);
         if (!comp) {
             fprintf(stderr, "OOM compress\n");
             return 1;
         }
 
-        zs.next_in = src;
-        zs.avail_in = src_len;
-        zs.next_out = comp;
-        zs.avail_out = bound;
-
-        if (deflateInit2(&zs, Z_BEST_SPEED, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
-            fprintf(stderr, "❌ deflateInit2 failed on frame %d\n", i);
-            return 1;
-        }
-
-        int ok = deflate(&zs, Z_FINISH);
-        deflateEnd(&zs);
-
-        if (ok != Z_STREAM_END) {
-            fprintf(stderr, "❌ deflate failed on frame %d (ret=%d)\n", i, ok);
+        size_t comp_size = ZSTD_compress(comp, bound, src, src_len, 1);  // level 1 = fast
+        if (ZSTD_isError(comp_size)) {
+            fprintf(stderr, "❌ zstd compress failed on frame %d: %s\n", i, ZSTD_getErrorName(comp_size));
             return 1;
         }
 
         offsets[i] = ftell(out);
-        fwrite(&zs.total_out, 4, 1, out);
-        fwrite(comp, 1, zs.total_out, out);
+        fwrite(&comp_size, 4, 1, out);
+        fwrite(comp, 1, comp_size, out);
         free(comp);
     }
     free(raw_buf);
@@ -175,11 +161,12 @@ int main(int argc, char **argv) {
     }
     fclose(audio_fp);
 
+    // Write offset table
     fseek(out, offset_index_pos, SEEK_SET);
     fwrite(offsets, sizeof(uint32_t), frame_count, out);
     fclose(out);
     free(offsets);
 
-    printf("✅ Packed %d raw-deflate frames + audio into %s\n", frame_count, output_path);
+    printf("✅ Packed %d zstd-compressed frames + audio into %s\n", frame_count, output_path);
     return 0;
 }
