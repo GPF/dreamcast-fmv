@@ -45,6 +45,18 @@ int main(int argc, char **argv) {
         perror("Audio open failed");
         return 1;
     }
+
+    // Check for and skip DcAF header if present
+    char head[4];
+    fread(head, 1, 4, audio_fp);
+    if (memcmp(head, "DcAF", 4) == 0) {
+        fseek(audio_fp, 0x40, SEEK_SET);  // Skip 64-byte header
+        printf("🔊 Skipping 64-byte DcAF header from %s\n", audio_path);
+    } else {
+        rewind(audio_fp);  // Raw ADPCM, no header
+    }
+
+    // Now get the real size
     fseek(audio_fp, 0, SEEK_END);
     long audio_size = ftell(audio_fp);
     fseek(audio_fp, 0, SEEK_SET);
@@ -80,7 +92,7 @@ int main(int argc, char **argv) {
 
     uint32_t skip = 0;
     if (memcmp(raw_buf, "DcTx", 4) == 0) {
-        uint8_t header_size = raw_buf[9];  // byte 5 = header_size
+        uint8_t header_size = raw_buf[9];  // byte 9 = header_size
         skip = (header_size + 1) * 32;
     }
     else if (memcmp(raw_buf, "DTEX", 4) == 0) skip = 0x10;
