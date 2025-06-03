@@ -3,13 +3,13 @@
 #include <dc/sound/sound.h>
 #include <dc/pvr.h>
 #include <dc/maple/controller.h>
-#include <zlib/zlib.h>
+#include <zstd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 #define DCMV_MAGIC "DCMV"
-#define VIDEO_FILE "/cd/movie.dcmv"
+#define VIDEO_FILE "/pc/movie.dcmv"
 
 static FILE *fp = NULL, *audio_fp = NULL;
 static uint8_t *frame_buffer = NULL, *compressed_buffer = NULL;
@@ -82,25 +82,15 @@ static int load_frame(int frame_num) {
 
     // printf("📦 Frame %d: compressed_size=%lu, decompressing...\n", frame_num, compressed_size);
 
-    z_stream zs = {0};
-    zs.next_in = compressed_buffer;
-    zs.avail_in = compressed_size;
-    zs.next_out = frame_buffer;
-    zs.avail_out = video_frame_size;
-
-    if (inflateInit2(&zs, -15) != Z_OK) {
-        printf("❌ inflateInit2 failed\n");
+    size_t decompressed = ZSTD_decompress(frame_buffer, video_frame_size, compressed_buffer, compressed_size);
+    if (ZSTD_isError(decompressed)) {
+        printf("❌ ZSTD decompress failed on frame %d: %s\n", frame_num, ZSTD_getErrorName(decompressed));
         return -1;
     }
-
-    int ret = inflate(&zs, Z_FINISH);
-    inflateEnd(&zs);
-
-    if (ret != Z_STREAM_END || zs.total_out != video_frame_size) {
-        printf("❌ zlib error: ret=%d, total_out=%lu, expected=%d\n", ret, zs.total_out, video_frame_size);
+    if (decompressed != video_frame_size) {
+        printf("❌ Unexpected decompressed size: got %u, expected %d\n", decompressed, video_frame_size);
         return -1;
     }
-
     // printf("✅ Frame %d decompressed to %lu bytes\n", frame_num, zs.total_out);
 
     // printf("🖼️ DMA transfer to PVR\n");
