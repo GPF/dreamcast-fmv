@@ -46,20 +46,22 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Check for and skip DcAF header if present
+    // Check for and skip DcAF header before measuring size
     char head[4];
     fread(head, 1, 4, audio_fp);
     if (memcmp(head, "DcAF", 4) == 0) {
         fseek(audio_fp, 0x40, SEEK_SET);  // Skip 64-byte header
         printf("🔊 Skipping 64-byte DcAF header from %s\n", audio_path);
     } else {
-        rewind(audio_fp);  // Raw ADPCM, no header
+        rewind(audio_fp);
     }
 
-    // Now get the real size
+    // Now calculate actual audio payload size (from current position, after header skip)
+    long audio_start = ftell(audio_fp);
     fseek(audio_fp, 0, SEEK_END);
-    long audio_size = ftell(audio_fp);
-    fseek(audio_fp, 0, SEEK_SET);
+    long audio_end = ftell(audio_fp);
+    long audio_size = audio_end - audio_start;
+    fseek(audio_fp, audio_start, SEEK_SET);
 
     char filename[FRAME_FILENAME_MAX];
     int frame_count = 0;
