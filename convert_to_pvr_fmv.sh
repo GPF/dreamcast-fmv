@@ -19,20 +19,23 @@ mkdir -p "$OUTPUT_DIR"
 mkdir -p "$TEMP_DIR"
 echo "📂 Created output and temp directories"
 
-# Extract and scale frames
-echo "🖼️  Extracting ${WIDTH}x${HEIGHT} PNG frames at ${FPS} fps..."
-ffmpeg -hide_banner -loglevel error -y -i "$INPUT" \
-  -vf "fps=${FPS},scale=${WIDTH}:${HEIGHT}:flags=lanczos" \
-  -start_number 0 "$TEMP_DIR/frame%04d.png" || exit 1
+echo "📁 Checking for existing $EXT frames..."
+if ls "$OUTPUT_DIR"/frame*.${EXT} 1> /dev/null 2>&1; then
+  echo "✅ Found preconverted .${EXT} frames, skipping frame extraction and conversion."
+else
+  echo "🖼️  Extracting PNG frames at ${FPS} fps..."
+  ffmpeg -hide_banner -loglevel error -y -i "$INPUT" \
+    -vf "fps=${FPS},scale=${WIDTH}:${HEIGHT}:flags=lanczos" \
+    -start_number 0 "$TEMP_DIR/frame%04d.png" || exit 1
 
-# Convert frames to Dreamcast texture format
-echo "🎞️ Converting PNG frames to .${EXT} with VQ compression..."
-frame_idx=0
-for png in "$TEMP_DIR"/frame*.png; do
-  base=$(printf "frame%04d" "$frame_idx")
-  "$PVRTX" -i "$png" -o "$OUTPUT_DIR/${base}.${EXT}" -f RGB565 -c small --dither 1 || exit 1
-  ((frame_idx++))
-done
+  echo "🎞️ Converting frames to VQ-compressed ${EXT}..."
+  frame_idx=0
+  for png in "$TEMP_DIR"/frame*.png; do
+    base=$(printf "frame%04d" "$frame_idx")
+    "$PVRTX" -i "$png" -o "$OUTPUT_DIR/${base}.${EXT}" -f RGB565 -c small --dither 1 || exit 1
+    ((frame_idx++))
+  done
+fi
 
 # Extract and convert audio
 echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
@@ -46,9 +49,9 @@ echo "📦 Packing into compressed .dcmv format..."
   "$OUTPUT_DIR/frame%04d.${EXT}" "./playdcmv/audio.dca" || exit 1
 
 # Clean up intermediate files
-echo "🧹 Cleaning up temporary files..."
-rm -rf "$OUTPUT_DIR"
-rm -rf "$TEMP_DIR"
+# echo "🧹 Cleaning up temporary files..."
+# rm -rf "$OUTPUT_DIR"
+# rm -rf "$TEMP_DIR"
 
 echo "✅ Final .dcmv + audio.dca created:"
 ls -lh ./playdcmv/movie.dcmv ./playdcmv/audio.dca

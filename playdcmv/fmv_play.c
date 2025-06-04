@@ -172,12 +172,12 @@ int main(void) {
   
     fp = fopen(VIDEO_FILE, "rb");
     if (!fp || load_header() < 0) return -1;
-
+    
     frame_offsets = malloc(num_frames * sizeof(uint32_t));
     fread(frame_offsets, sizeof(uint32_t), num_frames, fp);
 
-    for (int i = 0; i < 10; ++i)
-        printf("offset[%d] = 0x%08lX\n", i, frame_offsets[i]);
+    // for (int i = 0; i < 10; ++i)
+    //     printf("offset[%d] = 0x%08lX\n", i, frame_offsets[i]);
 
     compressed_buffer = malloc(max_compressed_size);
     if (!compressed_buffer) {
@@ -185,11 +185,13 @@ int main(void) {
         return -1;
     }
     compressed_buffer_size = max_compressed_size;
-
+    // printf("max_compressed_size=%d\n",max_compressed_size);
     uint32_t last_offset = frame_offsets[num_frames - 1];
+    // printf("Last offset 0x%08lX\n",last_offset);
     fseek(fp, last_offset, SEEK_SET);
     uint32_t last_size;
     fread(&last_size, 4, 1, fp);
+    // printf("last_size 0x%08lX\n",last_size);
     size_t audio_offset = last_offset + 4 + last_size;
     printf("🔊 Calculated audio offset: 0x%zX\n", audio_offset);
 
