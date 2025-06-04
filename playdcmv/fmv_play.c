@@ -3,10 +3,12 @@
 #include <dc/sound/sound.h>
 #include <dc/pvr.h>
 #include <dc/maple/controller.h>
-#include <zstd/zstd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#define ZSTD_STATIC_LINKING_ONLY
+#include <zstd/zstd.h>
+#include "profiler.h"
 
 #define DCMV_MAGIC "DCMV"
 #define VIDEO_FILE "/pc/movie.dcmv"
@@ -15,7 +17,7 @@ static FILE *fp = NULL, *audio_fp = NULL;
 static uint8_t *frame_buffer = NULL, *compressed_buffer = NULL;
 static size_t compressed_buffer_size = 0;
 static uint32_t *frame_offsets = NULL;
-
+uint32_t max_compressed_size = 0;
 static int frame_index = 0;
 static int video_width, video_height, fps, sample_rate, num_frames, video_frame_size, audio_channels;
 static int audio_bytes_fed = 0;
@@ -24,6 +26,7 @@ pvr_ptr_t pvr_txr;
 pvr_poly_hdr_t hdr;
 pvr_vertex_t vert[4];
 char screenshotfilename[256];
+static ZSTD_DCtx *dctx = NULL;
 
 static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t req) {
     if (audio_channels == 2) {
@@ -52,9 +55,10 @@ static int load_header(void) {
     fread(&audio_channels, 2, 1, fp);
     fread(&num_frames, 4, 1, fp);
     fread(&video_frame_size, 4, 1, fp);
+    fread(&max_compressed_size, 4, 1, fp); 
 
-    printf("📦 Header: %dx%d @ %dfps, %dHz, %dch, %d frames, frame_size=%d\n",
-           video_width, video_height, fps, sample_rate, audio_channels, num_frames, video_frame_size);
+    printf("📦 Header: %dx%d @ %dfps, %dHz, %dch, %d frames, frame_size=%d, max_compressed_size=%ld\n",
+           video_width, video_height, fps, sample_rate, audio_channels, num_frames, video_frame_size,max_compressed_size);
 
     return 0;
 }
@@ -72,6 +76,10 @@ static int load_frame(int frame_num) {
     if (compressed_size > compressed_buffer_size) {
         free(compressed_buffer);
         compressed_buffer = malloc(compressed_size);
+        if (!compressed_buffer) {
+            printf("❌ Failed to allocate compressed buffer\n");
+            return -1;
+        }
         compressed_buffer_size = compressed_size;
     }
 
@@ -80,22 +88,18 @@ static int load_frame(int frame_num) {
         return -1;
     }
 
-    // printf("📦 Frame %d: compressed_size=%lu, decompressing...\n", frame_num, compressed_size);
-
-    size_t decompressed = ZSTD_decompress(frame_buffer, video_frame_size, compressed_buffer, compressed_size);
+    size_t decompressed = ZSTD_decompressDCtx(dctx, frame_buffer, video_frame_size,
+                                               compressed_buffer, compressed_size);
     if (ZSTD_isError(decompressed)) {
         printf("❌ ZSTD decompress failed on frame %d: %s\n", frame_num, ZSTD_getErrorName(decompressed));
         return -1;
     }
     if (decompressed != video_frame_size) {
-        printf("❌ Unexpected decompressed size: got %u, expected %d\n", decompressed, video_frame_size);
+        printf("❌ Unexpected decompressed size: got %u, expected=%d\n", decompressed, video_frame_size);
         return -1;
     }
-    // printf("✅ Frame %d decompressed to %lu bytes\n", frame_num, zs.total_out);
 
-    // printf("🖼️ DMA transfer to PVR\n");
     pvr_txr_load_dma(frame_buffer, pvr_txr, video_frame_size, true, NULL, NULL);
-
     return 0;
 }
 
@@ -155,26 +159,52 @@ static void wait_exit(void) {
             if (state->buttons & CONT_A) {
                 sprintf(screenshotfilename, "/pc/screenshot%d.ppm", frame_index);
                 vid_screen_shot(screenshotfilename);
-            } else if (state->buttons)
-                arch_exit();
+            } else if (state->buttons){
+                            profiler_stop();
+                profiler_clean_up();
+                arch_exit();}
         }
     }
 }
 
 int main(void) {
+    profiler_init("/pc/gmon.out");
+    profiler_start();
+    dctx = ZSTD_createDCtx();
+    ZSTD_DCtx_setParameter(dctx, ZSTD_d_format, ZSTD_f_zstd1_magicless);
+    ZSTD_DCtx_setParameter(dctx, ZSTD_d_forceIgnoreChecksum, 0);    
     fp = fopen(VIDEO_FILE, "rb");
     if (!fp || load_header() < 0) return -1;
 
+    fseek(fp, 0x1A + 4 + num_frames * sizeof(uint32_t), SEEK_SET);  // 0x1A = 26 (header end), 4 = max_compressed_size
+
+    // Seek past the size table to the offset table
+    fseek(fp, 0x1A + 4 + num_frames * sizeof(uint32_t), SEEK_SET);  // 0x1A is 26 bytes header, 4 bytes max_compressed_size
+
     frame_offsets = malloc(num_frames * sizeof(uint32_t));
+    if (!frame_offsets) {
+        printf("❌ Failed to allocate frame_offsets\n");
+        return -1;
+    }
     fread(frame_offsets, sizeof(uint32_t), num_frames, fp);
 
-    uint32_t last_offset = frame_offsets[num_frames - 1];
+    uint32_t last_offset = 0;
+    uint32_t last_size = 0;
+    size_t audio_offset = 0;
+
+    last_offset = frame_offsets[num_frames - 1];
     fseek(fp, last_offset, SEEK_SET);
-    uint32_t last_size;
     fread(&last_size, 4, 1, fp);
-    size_t audio_offset = last_offset + 4 + last_size;
+    audio_offset = last_offset + 4 + last_size;
     printf("🔊 Calculated audio offset: 0x%zX\n", audio_offset);
 
+    compressed_buffer = malloc(max_compressed_size);
+    if (!compressed_buffer) {
+        printf("❌ Failed to allocate compressed buffer\n");
+        return -1;
+    }
+    compressed_buffer_size = max_compressed_size;
+        
     audio_fp = fopen(VIDEO_FILE, "rb");
     fseek(audio_fp, audio_offset, SEEK_SET);
 
@@ -189,13 +219,15 @@ int main(void) {
     snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
     audio_bytes_fed = 0;
 
-    int samples_per_frame = (sample_rate + fps / 2) / fps;
-    int bytes_per_frame = (samples_per_frame / 2) * audio_channels;
+    // Precompute bytes_per_frame as float
+    float samples_per_frame_f = (float)sample_rate / (float)fps;
+    float bytes_per_frame_f = samples_per_frame_f * ((float)audio_channels / 2.0f);
 
     while (frame_index < num_frames) {
-        int should_be_frame = audio_bytes_fed / bytes_per_frame;
-
+        int should_be_frame = (int)((float)audio_bytes_fed / bytes_per_frame_f);
+        // printf("here1\n");
         while (frame_index < should_be_frame && frame_index < num_frames) {
+
             if (load_frame(frame_index) != 0) break;
             draw_frame();
             ++frame_index;
@@ -205,6 +237,9 @@ int main(void) {
         wait_exit();
     }
 
+    profiler_stop();
+    profiler_clean_up();
+    ZSTD_freeDCtx(dctx);
     snd_stream_stop(stream);
     snd_stream_destroy(stream);
     pvr_mem_free(pvr_txr);
