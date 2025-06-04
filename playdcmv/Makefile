@@ -1,5 +1,5 @@
 TARGET = fmv_play.elf
-OBJS = fmv_play.o 
+OBJS = fmv_play.o profiler.o 
 
 all: rm-elf $(TARGET)
 
@@ -12,7 +12,7 @@ rm-elf:
 	-rm -f $(TARGET)
 
 $(TARGET): $(OBJS)
-	kos-cc -o $(TARGET) $(OBJS) -L$(KOS_BASE)/lib -lzstd
+	kos-cc -o $(TARGET) $(OBJS) -L$(KOS_BASE)/lib -llz4
 
 run: $(TARGET)
 	$(KOS_LOADER) $(TARGET)
@@ -20,4 +20,3 @@ run: $(TARGET)
 dist: $(TARGET)
 	-rm -f $(OBJS)
 	$(KOS_STRIP) $(TARGET)
-

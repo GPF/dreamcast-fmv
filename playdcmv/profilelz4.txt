@@ -1,0 +1,380 @@
+Flat profile:
+
+Each sample counts as 0.1 seconds.
+  %   cumulative   self              self     total           
+ time   seconds   seconds    calls  ms/call  ms/call  name    
+ 21.07      5.90     5.90                             _LZ4_decompress_safe
+ 13.39      9.65     3.75      212    17.69    24.06  _snd_stream_poll
+ 10.36     12.55     2.90                             _main
+  6.61     14.40     1.85                             L_cleanup_loop
+  6.07     16.10     1.70                             _memcpy
+  5.71     17.70     1.60      150    10.67    10.67  _maple_dev_status
+  4.46     18.95     1.25                             L_al4src
+  4.46     20.20     1.25                             L_cleanup
+  2.50     20.90     0.70       51    13.73    13.73  ___udivsi3_i4i
+  2.41     21.57     0.68                             L_2l_loop
+  2.32     22.23     0.65                             L_al4both_loop
+  2.14     22.82     0.60       21    28.57    28.57  _dcload_read
+  2.14     23.43     0.60                             L_ready
+  1.61     23.88     0.45      136     3.31     3.31  _maple_enum_type
+  1.52     24.30     0.42                             _irq_disable
+  1.43     24.70     0.40       29    13.79    13.79  ___sdivsi3_i4i
+  1.25     25.05     0.35      317     1.10     1.10  _sbrk
+  1.25     25.40     0.35                             L_cleanup2
+  0.89     25.65     0.25       31     8.06     8.06  _g2_read_32
+  0.71     25.85     0.20                             _dcache_flush_range
+  0.54     26.00     0.15        1   150.00   800.00  ___sread
+  0.54     26.15     0.15                             L_al4dst
+  0.54     26.30     0.15                             L_even
+  0.45     26.43     0.12                             L_al4both
+  0.36     26.52     0.10        1   100.00   900.00  ___srefill_r
+  0.36     26.62     0.10        1   100.00   100.00  _mutex_unlock
+  0.36     26.73     0.10        1   100.00   100.00  _spu_memset_sq
+  0.36     26.82     0.10        1   100.00   100.00  _timer_spin_sleep
+  0.36     26.93     0.10                             L_odddst
+  0.36     27.02     0.10                             L_small
+  0.36     27.12     0.10                             _genwait_wait
+  0.36     27.23     0.10                             _memset
+  0.36     27.32     0.10                             _pvr_scene_finish
+  0.36     27.43     0.10                             _sq_set32
+  0.27     27.50     0.07                             _vma_table_600
+  0.18     27.55     0.05        1    50.00    50.00  __read_r
+  0.18     27.60     0.05        1    50.00    50.00  _thd_get_current
+  0.18     27.65     0.05                             __open_r
+  0.18     27.70     0.05                             _g2_write_16
+  0.18     27.75     0.05                             _irq_restore
+  0.18     27.80     0.05                             _irqe_and
+  0.18     27.85     0.05                             _maple_enum_dev
+  0.18     27.90     0.05                             _snd_stream_shutdown
+  0.18     27.95     0.05                             _sscanf
+  0.18     28.00     0.05                             _thd_set_label
+  0.00     28.00     0.00     2569     0.00     0.00  _elf_free
+  0.00     28.00     0.00        2     0.00     0.00  _htonl
+
+ %         the percentage of the total running time of the
+time       program used by this function.
+
+cumulative a running sum of the number of seconds accounted
+ seconds   for by this function and those listed above it.
+
+ self      the number of seconds accounted for by this
+seconds    function alone.  This is the major sort for this
+           listing.
+
+calls      the number of times this function was invoked, if
+           this function is profiled, else blank.
+
+ self      the average number of milliseconds spent in this
+ms/call    function per call, if this function is profiled,
+	   else blank.
+
+ total     the average number of milliseconds spent in this
+ms/call    function and its descendents per call, if this
+	   function is profiled, else blank.
+
+name       the name of the function.  This is the minor sort
+           for this listing. The index shows the location of
+	   the function in the gprof listing. If the index is
+	   in parenthesis it shows where it would appear in
+	   the gprof listing if it were to be printed.
+
+Copyright (C) 2012-2023 Free Software Foundation, Inc.
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.
+
+		     Call graph (explanation follows)
+
+
+granularity: each sample hit covers 8 byte(s) for 0.36% of 28.00 seconds
+
+index % time    self  children    called     name
+                                 508             _main [1]
+[1]     35.9    2.90    7.15       0+508     _main [1]
+                3.75    1.35     212/212         _snd_stream_poll [3]
+                1.60    0.00     150/150         _maple_dev_status [6]
+                0.45    0.00     136/136         _maple_enum_type [17]
+                                 508             _main [1]
+-----------------------------------------------
+                                 101             _LZ4_decompress_safe [2]
+[2]     22.1    5.90    0.30       0+101     _LZ4_decompress_safe [2]
+                0.30    0.00     268/317         _sbrk [21]
+                                 101             _LZ4_decompress_safe [2]
+-----------------------------------------------
+                                1643             _snd_stream_poll [3]
+                3.75    1.35     212/212         _main [1]
+[3]     18.2    3.75    1.35     212+1643    _snd_stream_poll [3]
+                0.70    0.00      51/51          ___udivsi3_i4i [12]
+                0.40    0.00      29/29          ___sdivsi3_i4i [19]
+                0.25    0.00      31/31          _g2_read_32 [22]
+                                1643             _snd_stream_poll [3]
+-----------------------------------------------
+                                                 <spontaneous>
+[4]      6.6    1.85    0.00                 L_cleanup_loop [4]
+-----------------------------------------------
+                                                 <spontaneous>
+[5]      6.1    1.70    0.00                 _memcpy [5]
+-----------------------------------------------
+                1.60    0.00     150/150         _main [1]
+[6]      5.7    1.60    0.00     150         _maple_dev_status [6]
+-----------------------------------------------
+                                                 <spontaneous>
+[7]      4.5    1.25    0.00                 L_al4src [7]
+-----------------------------------------------
+                                                 <spontaneous>
+[8]      4.5    1.25    0.00                 L_cleanup [8]
+-----------------------------------------------
+                                                 <spontaneous>
+[9]      3.4    0.00    0.95                 __fread_r [9]
+                0.10    0.80       1/1           ___srefill_r [10]
+                0.05    0.00      49/317         _sbrk [21]
+-----------------------------------------------
+                0.10    0.80       1/1           __fread_r [9]
+[10]     3.2    0.10    0.80       1         ___srefill_r [10]
+                0.15    0.65       1/1           ___sread [11]
+-----------------------------------------------
+                                   1             ___sread [11]
+                0.15    0.65       1/1           ___srefill_r [10]
+[11]     2.9    0.15    0.65       1+1       ___sread [11]
+                0.60    0.00      21/21          _dcload_read [16]
+                0.05    0.00       1/1           __read_r [38]
+                                   1             ___sread [11]
+-----------------------------------------------
+                0.70    0.00      51/51          _snd_stream_poll [3]
+[12]     2.5    0.70    0.00      51         ___udivsi3_i4i [12]
+-----------------------------------------------
+                                                 <spontaneous>
+[13]     2.4    0.68    0.00                 L_2l_loop [13]
+-----------------------------------------------
+                                                 <spontaneous>
+[14]     2.3    0.65    0.00                 L_al4both_loop [14]
+-----------------------------------------------
+                                                 <spontaneous>
+[15]     2.1    0.60    0.00                 L_ready [15]
+-----------------------------------------------
+                                   1             _dcload_read [16]
+                0.60    0.00      21/21          ___sread [11]
+[16]     2.1    0.60    0.00      21+1       _dcload_read [16]
+                0.00    0.00    2541/2569        _elf_free [129]
+                                   1             _dcload_read [16]
+-----------------------------------------------
+                0.45    0.00     136/136         _main [1]
+[17]     1.6    0.45    0.00     136         _maple_enum_type [17]
+-----------------------------------------------
+                                                 <spontaneous>
+[18]     1.5    0.42    0.00                 _irq_disable [18]
+-----------------------------------------------
+                0.40    0.00      29/29          _snd_stream_poll [3]
+[19]     1.4    0.40    0.00      29         ___sdivsi3_i4i [19]
+-----------------------------------------------
+                                                 <spontaneous>
+[20]     1.2    0.35    0.00                 L_cleanup2 [20]
+-----------------------------------------------
+                0.05    0.00      49/317         __fread_r [9]
+                0.30    0.00     268/317         _LZ4_decompress_safe [2]
+[21]     1.2    0.35    0.00     317         _sbrk [21]
+-----------------------------------------------
+                0.25    0.00      31/31          _snd_stream_poll [3]
+[22]     0.9    0.25    0.00      31         _g2_read_32 [22]
+                0.00    0.00      28/2569        _elf_free [129]
+-----------------------------------------------
+                                                 <spontaneous>
+[23]     0.7    0.20    0.00                 _dcache_flush_range [23]
+-----------------------------------------------
+                                                 <spontaneous>
+[24]     0.7    0.00    0.20                 _snd_init [24]
+                0.10    0.00       1/1           _spu_memset_sq [32]
+                0.10    0.00       1/1           _timer_spin_sleep [33]
+-----------------------------------------------
+                                  10             _sq_set32 [25]
+[25]     0.7    0.10    0.10       0+10      _sq_set32 [25]
+                0.10    0.00       1/1           _mutex_unlock [31]
+                                  10             _sq_set32 [25]
+-----------------------------------------------
+                                                 <spontaneous>
+[26]     0.5    0.15    0.00                 L_al4dst [26]
+-----------------------------------------------
+                                                 <spontaneous>
+[27]     0.5    0.15    0.00                 L_even [27]
+-----------------------------------------------
+                                                 <spontaneous>
+[28]     0.4    0.12    0.00                 L_al4both [28]
+-----------------------------------------------
+                                                 <spontaneous>
+[29]     0.4    0.10    0.00                 L_odddst [29]
+-----------------------------------------------
+                                                 <spontaneous>
+[30]     0.4    0.10    0.00                 L_small [30]
+-----------------------------------------------
+                0.10    0.00       1/1           _sq_set32 [25]
+[31]     0.4    0.10    0.00       1         _mutex_unlock [31]
+-----------------------------------------------
+                0.10    0.00       1/1           _snd_init [24]
+[32]     0.4    0.10    0.00       1         _spu_memset_sq [32]
+-----------------------------------------------
+                0.10    0.00       1/1           _snd_init [24]
+[33]     0.4    0.10    0.00       1         _timer_spin_sleep [33]
+-----------------------------------------------
+                                 167             _genwait_wait [34]
+[34]     0.4    0.10    0.00       0+167     _genwait_wait [34]
+                                 167             _genwait_wait [34]
+-----------------------------------------------
+                                                 <spontaneous>
+[35]     0.4    0.10    0.00                 _memset [35]
+-----------------------------------------------
+                                   1             _pvr_scene_finish [36]
+[36]     0.4    0.10    0.00       0+1       _pvr_scene_finish [36]
+                                   1             _pvr_scene_finish [36]
+-----------------------------------------------
+                                                 <spontaneous>
+[37]     0.3    0.07    0.00                 _vma_table_600 [37]
+-----------------------------------------------
+                0.05    0.00       1/1           ___sread [11]
+[38]     0.2    0.05    0.00       1         __read_r [38]
+-----------------------------------------------
+                0.05    0.00       1/1           ___newlib_lock_acquire_recursive [40]
+[39]     0.2    0.05    0.00       1         _thd_get_current [39]
+-----------------------------------------------
+                                                 <spontaneous>
+[40]     0.2    0.00    0.05                 ___newlib_lock_acquire_recursive [40]
+                0.05    0.00       1/1           _thd_get_current [39]
+-----------------------------------------------
+                                                 <spontaneous>
+[41]     0.2    0.05    0.00                 __open_r [41]
+-----------------------------------------------
+                                                 <spontaneous>
+[42]     0.2    0.05    0.00                 _g2_write_16 [42]
+-----------------------------------------------
+                                                 <spontaneous>
+[43]     0.2    0.05    0.00                 _irq_restore [43]
+-----------------------------------------------
+                                                 <spontaneous>
+[44]     0.2    0.05    0.00                 _irqe_and [44]
+-----------------------------------------------
+                                                 <spontaneous>
+[45]     0.2    0.05    0.00                 _maple_enum_dev [45]
+-----------------------------------------------
+                                                 <spontaneous>
+[46]     0.2    0.05    0.00                 _snd_stream_shutdown [46]
+-----------------------------------------------
+                                                 <spontaneous>
+[47]     0.2    0.05    0.00                 _sscanf [47]
+-----------------------------------------------
+                                                 <spontaneous>
+[48]     0.2    0.05    0.00                 _thd_set_label [48]
+-----------------------------------------------
+                0.00    0.00      28/2569        _g2_read_32 [22]
+                0.00    0.00    2541/2569        _dcload_read [16]
+[129]    0.0    0.00    0.00    2569         _elf_free [129]
+-----------------------------------------------
+                0.00    0.00       2/2           _dma_map_src [448]
+[130]    0.0    0.00    0.00       2         _htonl [130]
+-----------------------------------------------
+
+ This table describes the call tree of the program, and was sorted by
+ the total amount of time spent in each function and its children.
+
+ Each entry in this table consists of several lines.  The line with the
+ index number at the left hand margin lists the current function.
+ The lines above it list the functions that called this function,
+ and the lines below it list the functions this one called.
+ This line lists:
+     index	A unique number given to each element of the table.
+		Index numbers are sorted numerically.
+		The index number is printed next to every function name so
+		it is easier to look up where the function is in the table.
+
+     % time	This is the percentage of the `total' time that was spent
+		in this function and its children.  Note that due to
+		different viewpoints, functions excluded by options, etc,
+		these numbers will NOT add up to 100%.
+
+     self	This is the total amount of time spent in this function.
+
+     children	This is the total amount of time propagated into this
+		function by its children.
+
+     called	This is the number of times the function was called.
+		If the function called itself recursively, the number
+		only includes non-recursive calls, and is followed by
+		a `+' and the number of recursive calls.
+
+     name	The name of the current function.  The index number is
+		printed after it.  If the function is a member of a
+		cycle, the cycle number is printed between the
+		function's name and the index number.
+
+
+ For the function's parents, the fields have the following meanings:
+
+     self	This is the amount of time that was propagated directly
+		from the function into this parent.
+
+     children	This is the amount of time that was propagated from
+		the function's children into this parent.
+
+     called	This is the number of times this parent called the
+		function `/' the total number of times the function
+		was called.  Recursive calls to the function are not
+		included in the number after the `/'.
+
+     name	This is the name of the parent.  The parent's index
+		number is printed after it.  If the parent is a
+		member of a cycle, the cycle number is printed between
+		the name and the index number.
+
+ If the parents of the function cannot be determined, the word
+ `<spontaneous>' is printed in the `name' field, and all the other
+ fields are blank.
+
+ For the function's children, the fields have the following meanings:
+
+     self	This is the amount of time that was propagated directly
+		from the child into the function.
+
+     children	This is the amount of time that was propagated from the
+		child's children to the function.
+
+     called	This is the number of times the function called
+		this child `/' the total number of times the child
+		was called.  Recursive calls by the child are not
+		listed in the number after the `/'.
+
+     name	This is the name of the child.  The child's index
+		number is printed after it.  If the child is a
+		member of a cycle, the cycle number is printed
+		between the name and the index number.
+
+ If there are any cycles (circles) in the call graph, there is an
+ entry for the cycle-as-a-whole.  This entry shows who called the
+ cycle (as parents) and the members of the cycle (as children.)
+ The `+' recursive calls entry shows the number of function calls that
+ were internal to the cycle, and the calls entry for each member shows,
+ for that member, how many times it was called from other members of
+ the cycle.
+
+Copyright (C) 2012-2023 Free Software Foundation, Inc.
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.
+
+Index by function name
+
+  [13] L_2l_loop              [12] ___udivsi3_i4i         [17] _maple_enum_type
+  [28] L_al4both              [41] __open_r                [5] _memcpy
+  [14] L_al4both_loop         [38] __read_r               [35] _memset
+  [26] L_al4dst               [23] _dcache_flush_range    [31] _mutex_unlock
+   [7] L_al4src               [16] _dcload_read (fs_dcload.c) [36] _pvr_scene_finish
+   [8] L_cleanup             [129] _elf_free              [21] _sbrk
+  [20] L_cleanup2             [22] _g2_read_32             [3] _snd_stream_poll
+   [4] L_cleanup_loop         [42] _g2_write_16           [46] _snd_stream_shutdown
+  [27] L_even                 [34] _genwait_wait          [32] _spu_memset_sq
+  [29] L_odddst              [130] _htonl                 [25] _sq_set32
+  [15] L_ready                [18] _irq_disable           [47] _sscanf
+  [30] L_small                [43] _irq_restore           [39] _thd_get_current
+   [2] _LZ4_decompress_safe   [44] _irqe_and              [48] _thd_set_label
+  [19] ___sdivsi3_i4i          [1] _main                  [33] _timer_spin_sleep
+  [11] ___sread                [6] _maple_dev_status      [37] _vma_table_600
+  [10] ___srefill_r           [45] _maple_enum_dev

@@ -3,10 +3,12 @@
 #include <dc/sound/sound.h>
 #include <dc/pvr.h>
 #include <dc/maple/controller.h>
-#include <zstd/zstd.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <lz4/lz4.h>
+#include "profiler.h"
+
 
 #define DCMV_MAGIC "DCMV"
 #define VIDEO_FILE "/pc/movie.dcmv"
@@ -17,7 +19,7 @@ static size_t compressed_buffer_size = 0;
 static uint32_t *frame_offsets = NULL;
 
 static int frame_index = 0;
-static int video_width, video_height, fps, sample_rate, num_frames, video_frame_size, audio_channels;
+static int video_width, video_height, fps, sample_rate, num_frames, video_frame_size, audio_channels, max_compressed_size;
 static int audio_bytes_fed = 0;
 snd_stream_hnd_t stream;
 pvr_ptr_t pvr_txr;
@@ -42,7 +44,7 @@ static int load_header(void) {
     char magic[4];
     fread(magic, 1, 4, fp);
     if (memcmp(magic, DCMV_MAGIC, 4)) return -1;
-
+    printf("Magic %s",magic);
     uint32_t version;
     fread(&version, 4, 1, fp);
     fread(&video_width, 2, 1, fp);
@@ -52,9 +54,10 @@ static int load_header(void) {
     fread(&audio_channels, 2, 1, fp);
     fread(&num_frames, 4, 1, fp);
     fread(&video_frame_size, 4, 1, fp);
+    fread(&max_compressed_size, 4, 1, fp);
 
-    printf("📦 Header: %dx%d @ %dfps, %dHz, %dch, %d frames, frame_size=%d\n",
-           video_width, video_height, fps, sample_rate, audio_channels, num_frames, video_frame_size);
+    printf("📦 Header: %dx%d @ %dfps, %dHz, %dch, %d frames, frame_size=%d, max_compressed_size=%d\n",
+           video_width, video_height, fps, sample_rate, audio_channels, num_frames, video_frame_size, max_compressed_size);
 
     return 0;
 }
@@ -63,6 +66,7 @@ static int load_frame(int frame_num) {
     uint32_t offset = frame_offsets[frame_num];
     fseek(fp, offset, SEEK_SET);
 
+
     uint32_t compressed_size;
     if (fread(&compressed_size, 1, 4, fp) != 4) {
         printf("❌ Failed to read compressed size\n");
@@ -70,32 +74,31 @@ static int load_frame(int frame_num) {
     }
 
     if (compressed_size > compressed_buffer_size) {
-        free(compressed_buffer);
-        compressed_buffer = malloc(compressed_size);
-        compressed_buffer_size = compressed_size;
-    }
+        printf("❌ Compressed frame too large: %lu > %zu\n", compressed_size, compressed_buffer_size);
+        return -1;
+    }    
 
     if (fread(compressed_buffer, 1, compressed_size, fp) != compressed_size) {
         printf("❌ Failed to read compressed frame data (%lu bytes)\n", compressed_size);
         return -1;
     }
 
-    // printf("📦 Frame %d: compressed_size=%lu, decompressing...\n", frame_num, compressed_size);
+    int decompressed = LZ4_decompress_safe(
+        (const char *)compressed_buffer,
+        (char *)frame_buffer,
+        compressed_size,
+        video_frame_size);
 
-    size_t decompressed = ZSTD_decompress(frame_buffer, video_frame_size, compressed_buffer, compressed_size);
-    if (ZSTD_isError(decompressed)) {
-        printf("❌ ZSTD decompress failed on frame %d: %s\n", frame_num, ZSTD_getErrorName(decompressed));
+    if (decompressed < 0) {
+        printf("❌ LZ4 decompress failed on frame %d\n", frame_num);
         return -1;
     }
     if (decompressed != video_frame_size) {
-        printf("❌ Unexpected decompressed size: got %u, expected %d\n", decompressed, video_frame_size);
+        printf("❌ Unexpected decompressed size: got %d, expected=%d\n", decompressed, video_frame_size);
         return -1;
-    }
-    // printf("✅ Frame %d decompressed to %lu bytes\n", frame_num, zs.total_out);
+    }        
 
-    // printf("🖼️ DMA transfer to PVR\n");
     pvr_txr_load_dma(frame_buffer, pvr_txr, video_frame_size, true, NULL, NULL);
-
     return 0;
 }
 
@@ -155,18 +158,33 @@ static void wait_exit(void) {
             if (state->buttons & CONT_A) {
                 sprintf(screenshotfilename, "/pc/screenshot%d.ppm", frame_index);
                 vid_screen_shot(screenshotfilename);
-            } else if (state->buttons)
-                arch_exit();
+            } else if (state->buttons){
+                            profiler_stop();
+                profiler_clean_up();
+                arch_exit();}
         }
     }
 }
 
 int main(void) {
+    profiler_init("/pc/gmon.out");
+    profiler_start();
+  
     fp = fopen(VIDEO_FILE, "rb");
     if (!fp || load_header() < 0) return -1;
 
     frame_offsets = malloc(num_frames * sizeof(uint32_t));
     fread(frame_offsets, sizeof(uint32_t), num_frames, fp);
+
+    for (int i = 0; i < 10; ++i)
+        printf("offset[%d] = 0x%08lX\n", i, frame_offsets[i]);
+
+    compressed_buffer = malloc(max_compressed_size);
+    if (!compressed_buffer) {
+        printf("❌ Failed to allocate compressed buffer\n");
+        return -1;
+    }
+    compressed_buffer_size = max_compressed_size;
 
     uint32_t last_offset = frame_offsets[num_frames - 1];
     fseek(fp, last_offset, SEEK_SET);
@@ -189,12 +207,13 @@ int main(void) {
     snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
     audio_bytes_fed = 0;
 
-    int samples_per_frame = (sample_rate + fps / 2) / fps;
-    int bytes_per_frame = (samples_per_frame / 2) * audio_channels;
+    // Precompute bytes_per_frame as float
+    float samples_per_frame_f = (float)sample_rate / (float)fps;
+    float bytes_per_frame_f = samples_per_frame_f * ((float)audio_channels / 2.0f);
 
     while (frame_index < num_frames) {
-        int should_be_frame = audio_bytes_fed / bytes_per_frame;
-
+        int should_be_frame = (int)((float)audio_bytes_fed / bytes_per_frame_f);
+        // printf("load frame %d, should_be_frame %d\n", frame_index, should_be_frame);
         while (frame_index < should_be_frame && frame_index < num_frames) {
             if (load_frame(frame_index) != 0) break;
             draw_frame();
@@ -205,6 +224,8 @@ int main(void) {
         wait_exit();
     }
 
+    profiler_stop();
+    profiler_clean_up();
     snd_stream_stop(stream);
     snd_stream_destroy(stream);
     pvr_mem_free(pvr_txr);
