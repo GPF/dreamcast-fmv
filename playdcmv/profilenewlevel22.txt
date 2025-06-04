@@ -1,0 +1,429 @@
+Flat profile:
+
+Each sample counts as 0.1 seconds.
+  %   cumulative   self              self     total           
+ time   seconds   seconds    calls   s/call   s/call  name    
+ 42.41     64.50    64.50                             _ZSTD_decompressBlock_internal
+ 12.75     83.90    19.40                             _ZSTD_XXH64_digest
+  5.88     92.85     8.95      161     0.06     0.07  _snd_stream_poll
+  4.64     99.90     7.05                             L_al4src
+  3.35    105.00     5.10                             _main
+  2.89    109.40     4.40                             _memcpy
+  2.73    113.55     4.15                             L_cleanup_loop
+  2.63    117.55     4.00        1     4.00     5.34  _ZSTD_buildFSETable
+  2.30    121.05     3.50                             L_al4both_loop
+  2.20    124.40     3.35                             L_2l_loop
+  2.01    127.45     3.05                             L_even
+  1.97    130.45     3.00       83     0.04     0.04  _maple_dev_status
+  1.81    133.20     2.75                             L_cleanup
+  1.41    135.35     2.15                             L_al4dst
+  0.95    136.80     1.45       55     0.03     0.03  _maple_enum_type
+  0.95    138.25     1.45       31     0.05     0.05  ___udivsi3_i4i
+  0.92    139.65     1.40       23     0.06     0.06  ___clzsi2
+  0.92    141.05     1.40                             L_ready
+  0.66    142.05     1.00                             L_al4both
+  0.66    143.05     1.00                             L_odddst
+  0.62    144.00     0.95       29     0.03     0.03  ___sdivsi3_i4i
+  0.59    144.90     0.90                             _HUF_readDTableX1_wksp
+  0.43    145.55     0.65      541     0.00     0.00  _sbrk
+  0.39    146.15     0.60                             _irq_disable
+  0.36    146.70     0.55                             L_cleanup2
+  0.33    147.20     0.50       18     0.03     0.03  _dcload_read
+  0.33    147.70     0.50                             __fseeko_r
+  0.33    148.20     0.50                             _dcache_flush_range
+  0.20    148.50     0.30                             _HUF_readStats_wksp
+  0.20    148.80     0.30                             _genwait_wait
+  0.16    149.05     0.25       16     0.02     0.02  _g2_read_32
+  0.13    149.25     0.20        2     0.10     0.45  ___sread
+  0.13    149.45     0.20        2     0.10     0.10  _fs_read
+  0.13    149.65     0.20        1     0.20     0.26  _FSE_readNCount_bmi2
+  0.13    149.85     0.20        1     0.20     0.20  _ZSTD_decodeLiteralsBlock
+  0.13    150.05     0.20        1     0.20     1.10  ___srefill_r
+  0.13    150.25     0.20                             L_small
+  0.13    150.45     0.20                             _FSE_decompress_wksp_bmi2
+  0.13    150.65     0.20                             ___newlib_lock_acquire_recursive
+  0.13    150.85     0.20                             _memset
+  0.13    151.05     0.20                             _sq_set32
+  0.10    151.20     0.15                             _irq_restore
+  0.10    151.35     0.15                             _irqe_and
+  0.10    151.50     0.15                             _maple_enum_dev
+  0.10    151.65     0.15                             _snd_stream_shutdown
+  0.07    151.75     0.10        1     0.10     0.36  _FSE_readNCount
+  0.07    151.85     0.10        1     0.10     0.10  _ZSTD_getcBlockSize
+  0.07    151.95     0.10        1     0.10     0.10  _spu_memset_sq
+  0.07    152.05     0.10                             _vma_table_600
+  0.03    152.10     0.05                             _g2_write_16
+  0.00    152.10     0.00     2031     0.00     0.00  _elf_free
+  0.00    152.10     0.00        7     0.00     0.00  _htonl
+
+ %         the percentage of the total running time of the
+time       program used by this function.
+
+cumulative a running sum of the number of seconds accounted
+ seconds   for by this function and those listed above it.
+
+ self      the number of seconds accounted for by this
+seconds    function alone.  This is the major sort for this
+           listing.
+
+calls      the number of times this function was invoked, if
+           this function is profiled, else blank.
+
+ self      the average number of milliseconds spent in this
+ms/call    function per call, if this function is profiled,
+	   else blank.
+
+ total     the average number of milliseconds spent in this
+ms/call    function and its descendents per call, if this
+	   function is profiled, else blank.
+
+name       the name of the function.  This is the minor sort
+           for this listing. The index shows the location of
+	   the function in the gprof listing. If the index is
+	   in parenthesis it shows where it would appear in
+	   the gprof listing if it were to be printed.
+
+Copyright (C) 2012-2023 Free Software Foundation, Inc.
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.
+
+		     Call graph (explanation follows)
+
+
+granularity: each sample hit covers 8 byte(s) for 0.07% of 152.10 seconds
+
+index % time    self  children    called     name
+                                 904             _ZSTD_decompressBlock_internal [1]
+[1]     42.9   64.50    0.80       0+904     _ZSTD_decompressBlock_internal [1]
+                0.60    0.00     502/541         _sbrk [27]
+                0.20    0.00       1/1           _ZSTD_decodeLiteralsBlock [41]
+                                 904             _ZSTD_decompressBlock_internal [1]
+-----------------------------------------------
+                                 219             _main [2]
+[2]     13.9    5.10   16.05       0+219     _main [2]
+                8.95    2.65     161/161         _snd_stream_poll [4]
+                3.00    0.00      83/83          _maple_dev_status [13]
+                1.45    0.00      55/55          _maple_enum_type [16]
+                                 219             _main [2]
+-----------------------------------------------
+                                 254             _ZSTD_XXH64_digest [3]
+[3]     12.8   19.40    0.00       0+254     _ZSTD_XXH64_digest [3]
+                                 254             _ZSTD_XXH64_digest [3]
+-----------------------------------------------
+                                1340             _snd_stream_poll [4]
+                8.95    2.65     161/161         _main [2]
+[4]      7.6    8.95    2.65     161+1340    _snd_stream_poll [4]
+                1.45    0.00      31/31          ___udivsi3_i4i [17]
+                0.95    0.00      29/29          ___sdivsi3_i4i [24]
+                0.25    0.00      16/16          _g2_read_32 [38]
+                                1340             _snd_stream_poll [4]
+-----------------------------------------------
+                                                 <spontaneous>
+[5]      4.6    7.05    0.00                 L_al4src [5]
+-----------------------------------------------
+                                  48             _ZSTD_buildFSETable [6]
+                4.00    1.34       1/1           _ZSTD_decodeSeqHeaders [7]
+[6]      3.5    4.00    1.34       1+48      _ZSTD_buildFSETable [6]
+                1.34    0.00      22/23          ___clzsi2 [19]
+                0.00    0.00       1/541         _sbrk [27]
+                                  48             _ZSTD_buildFSETable [6]
+-----------------------------------------------
+                                                 <spontaneous>
+[7]      3.5    0.00    5.34                 _ZSTD_decodeSeqHeaders [7]
+                4.00    1.34       1/1           _ZSTD_buildFSETable [6]
+-----------------------------------------------
+                                                 <spontaneous>
+[8]      2.9    4.40    0.00                 _memcpy [8]
+-----------------------------------------------
+                                                 <spontaneous>
+[9]      2.7    4.15    0.00                 L_cleanup_loop [9]
+-----------------------------------------------
+                                                 <spontaneous>
+[10]     2.3    3.50    0.00                 L_al4both_loop [10]
+-----------------------------------------------
+                                                 <spontaneous>
+[11]     2.2    3.35    0.00                 L_2l_loop [11]
+-----------------------------------------------
+                                                 <spontaneous>
+[12]     2.0    3.05    0.00                 L_even [12]
+-----------------------------------------------
+                3.00    0.00      83/83          _main [2]
+[13]     2.0    3.00    0.00      83         _maple_dev_status [13]
+-----------------------------------------------
+                                                 <spontaneous>
+[14]     1.8    2.75    0.00                 L_cleanup [14]
+-----------------------------------------------
+                                                 <spontaneous>
+[15]     1.4    2.15    0.00                 L_al4dst [15]
+-----------------------------------------------
+                1.45    0.00      55/55          _main [2]
+[16]     1.0    1.45    0.00      55         _maple_enum_type [16]
+-----------------------------------------------
+                1.45    0.00      31/31          _snd_stream_poll [4]
+[17]     1.0    1.45    0.00      31         ___udivsi3_i4i [17]
+-----------------------------------------------
+                                                 <spontaneous>
+[18]     0.9    1.40    0.00                 L_ready [18]
+-----------------------------------------------
+                0.06    0.00       1/23          _FSE_readNCount_bmi2 [37]
+                1.34    0.00      22/23          _ZSTD_buildFSETable [6]
+[19]     0.9    1.40    0.00      23         ___clzsi2 [19]
+-----------------------------------------------
+                                                 <spontaneous>
+[20]     0.8    0.00    1.14                 __fread_r [20]
+                0.20    0.90       1/1           ___srefill_r [21]
+                0.04    0.00      34/541         _sbrk [27]
+-----------------------------------------------
+                                   1             ___srefill_r [21]
+                0.20    0.90       1/1           __fread_r [20]
+[21]     0.7    0.20    0.90       1+1       ___srefill_r [21]
+                0.20    0.70       2/2           ___sread [25]
+                                   1             ___srefill_r [21]
+-----------------------------------------------
+                                                 <spontaneous>
+[22]     0.7    1.00    0.00                 L_al4both [22]
+-----------------------------------------------
+                                                 <spontaneous>
+[23]     0.7    1.00    0.00                 L_odddst [23]
+-----------------------------------------------
+                0.95    0.00      29/29          _snd_stream_poll [4]
+[24]     0.6    0.95    0.00      29         ___sdivsi3_i4i [24]
+-----------------------------------------------
+                0.20    0.70       2/2           ___srefill_r [21]
+[25]     0.6    0.20    0.70       2         ___sread [25]
+                0.50    0.00      18/18          _dcload_read [30]
+                0.20    0.00       2/2           _fs_read [40]
+-----------------------------------------------
+                                   9             _HUF_readDTableX1_wksp [26]
+[26]     0.6    0.90    0.00       0+9       _HUF_readDTableX1_wksp [26]
+                                   9             _HUF_readDTableX1_wksp [26]
+-----------------------------------------------
+                0.00    0.00       1/541         _ZSTD_buildFSETable [6]
+                0.00    0.00       4/541         _ZSTD_safecopy [56]
+                0.04    0.00      34/541         __fread_r [20]
+                0.60    0.00     502/541         _ZSTD_decompressBlock_internal [1]
+[27]     0.4    0.65    0.00     541         _sbrk [27]
+-----------------------------------------------
+                                                 <spontaneous>
+[28]     0.4    0.60    0.00                 _irq_disable [28]
+-----------------------------------------------
+                                                 <spontaneous>
+[29]     0.4    0.55    0.00                 L_cleanup2 [29]
+-----------------------------------------------
+                0.50    0.00      18/18          ___sread [25]
+[30]     0.3    0.50    0.00      18         _dcload_read [30]
+                0.00    0.00    2007/2031        _elf_free [137]
+-----------------------------------------------
+                                   6             __fseeko_r [31]
+[31]     0.3    0.50    0.00       0+6       __fseeko_r [31]
+                                   6             __fseeko_r [31]
+-----------------------------------------------
+                                                 <spontaneous>
+[32]     0.3    0.50    0.00                 _dcache_flush_range [32]
+-----------------------------------------------
+                0.10    0.26       1/1           _ZSTD_buildSeqTable.constprop.0 [34]
+[33]     0.2    0.10    0.26       1         _FSE_readNCount [33]
+                0.20    0.06       1/1           _FSE_readNCount_bmi2 [37]
+-----------------------------------------------
+                                                 <spontaneous>
+[34]     0.2    0.00    0.36                 _ZSTD_buildSeqTable.constprop.0 [34]
+                0.10    0.26       1/1           _FSE_readNCount [33]
+-----------------------------------------------
+                                   3             _HUF_readStats_wksp [35]
+[35]     0.2    0.30    0.00       0+3       _HUF_readStats_wksp [35]
+                                   3             _HUF_readStats_wksp [35]
+-----------------------------------------------
+                                 221             _genwait_wait [36]
+[36]     0.2    0.30    0.00       0+221     _genwait_wait [36]
+                                 221             _genwait_wait [36]
+-----------------------------------------------
+                                   1             _FSE_readNCount_bmi2 [37]
+                0.20    0.06       1/1           _FSE_readNCount [33]
+[37]     0.2    0.20    0.06       1+1       _FSE_readNCount_bmi2 [37]
+                0.06    0.00       1/23          ___clzsi2 [19]
+                                   1             _FSE_readNCount_bmi2 [37]
+-----------------------------------------------
+                0.25    0.00      16/16          _snd_stream_poll [4]
+[38]     0.2    0.25    0.00      16         _g2_read_32 [38]
+                0.00    0.00      24/2031        _elf_free [137]
+-----------------------------------------------
+                                                 <spontaneous>
+[39]     0.1    0.20    0.00                 L_small [39]
+-----------------------------------------------
+                0.20    0.00       2/2           ___sread [25]
+[40]     0.1    0.20    0.00       2         _fs_read [40]
+-----------------------------------------------
+                                   1             _ZSTD_decodeLiteralsBlock [41]
+                0.20    0.00       1/1           _ZSTD_decompressBlock_internal [1]
+[41]     0.1    0.20    0.00       1+1       _ZSTD_decodeLiteralsBlock [41]
+                                   1             _ZSTD_decodeLiteralsBlock [41]
+-----------------------------------------------
+                                   2             _FSE_decompress_wksp_bmi2 [42]
+[42]     0.1    0.20    0.00       0+2       _FSE_decompress_wksp_bmi2 [42]
+                                   2             _FSE_decompress_wksp_bmi2 [42]
+-----------------------------------------------
+                                   2             ___newlib_lock_acquire_recursive [43]
+[43]     0.1    0.20    0.00       0+2       ___newlib_lock_acquire_recursive [43]
+                                   2             ___newlib_lock_acquire_recursive [43]
+-----------------------------------------------
+                                                 <spontaneous>
+[44]     0.1    0.20    0.00                 _memset [44]
+-----------------------------------------------
+                                  10             _sq_set32 [45]
+[45]     0.1    0.20    0.00       0+10      _sq_set32 [45]
+                                  10             _sq_set32 [45]
+-----------------------------------------------
+                                                 <spontaneous>
+[46]     0.1    0.15    0.00                 _irq_restore [46]
+-----------------------------------------------
+                                                 <spontaneous>
+[47]     0.1    0.15    0.00                 _irqe_and [47]
+-----------------------------------------------
+                                                 <spontaneous>
+[48]     0.1    0.15    0.00                 _maple_enum_dev [48]
+-----------------------------------------------
+                                                 <spontaneous>
+[49]     0.1    0.15    0.00                 _snd_stream_shutdown [49]
+-----------------------------------------------
+                0.10    0.00       1/1           _ZSTD_decompressMultiFrame [52]
+[50]     0.1    0.10    0.00       1         _ZSTD_getcBlockSize [50]
+-----------------------------------------------
+                0.10    0.00       1/1           _snd_init [53]
+[51]     0.1    0.10    0.00       1         _spu_memset_sq [51]
+-----------------------------------------------
+                                                 <spontaneous>
+[52]     0.1    0.00    0.10                 _ZSTD_decompressMultiFrame [52]
+                0.10    0.00       1/1           _ZSTD_getcBlockSize [50]
+-----------------------------------------------
+                                                 <spontaneous>
+[53]     0.1    0.00    0.10                 _snd_init [53]
+                0.10    0.00       1/1           _spu_memset_sq [51]
+-----------------------------------------------
+                                                 <spontaneous>
+[54]     0.1    0.10    0.00                 _vma_table_600 [54]
+-----------------------------------------------
+                                                 <spontaneous>
+[55]     0.0    0.05    0.00                 _g2_write_16 [55]
+-----------------------------------------------
+                                                 <spontaneous>
+[56]     0.0    0.00    0.00                 _ZSTD_safecopy [56]
+                0.00    0.00       4/541         _sbrk [27]
+-----------------------------------------------
+                0.00    0.00      24/2031        _g2_read_32 [38]
+                0.00    0.00    2007/2031        _dcload_read [30]
+[137]    0.0    0.00    0.00    2031         _elf_free [137]
+-----------------------------------------------
+                0.00    0.00       7/7           _dma_map_src [496]
+[138]    0.0    0.00    0.00       7         _htonl [138]
+-----------------------------------------------
+
+ This table describes the call tree of the program, and was sorted by
+ the total amount of time spent in each function and its children.
+
+ Each entry in this table consists of several lines.  The line with the
+ index number at the left hand margin lists the current function.
+ The lines above it list the functions that called this function,
+ and the lines below it list the functions this one called.
+ This line lists:
+     index	A unique number given to each element of the table.
+		Index numbers are sorted numerically.
+		The index number is printed next to every function name so
+		it is easier to look up where the function is in the table.
+
+     % time	This is the percentage of the `total' time that was spent
+		in this function and its children.  Note that due to
+		different viewpoints, functions excluded by options, etc,
+		these numbers will NOT add up to 100%.
+
+     self	This is the total amount of time spent in this function.
+
+     children	This is the total amount of time propagated into this
+		function by its children.
+
+     called	This is the number of times the function was called.
+		If the function called itself recursively, the number
+		only includes non-recursive calls, and is followed by
+		a `+' and the number of recursive calls.
+
+     name	The name of the current function.  The index number is
+		printed after it.  If the function is a member of a
+		cycle, the cycle number is printed between the
+		function's name and the index number.
+
+
+ For the function's parents, the fields have the following meanings:
+
+     self	This is the amount of time that was propagated directly
+		from the function into this parent.
+
+     children	This is the amount of time that was propagated from
+		the function's children into this parent.
+
+     called	This is the number of times this parent called the
+		function `/' the total number of times the function
+		was called.  Recursive calls to the function are not
+		included in the number after the `/'.
+
+     name	This is the name of the parent.  The parent's index
+		number is printed after it.  If the parent is a
+		member of a cycle, the cycle number is printed between
+		the name and the index number.
+
+ If the parents of the function cannot be determined, the word
+ `<spontaneous>' is printed in the `name' field, and all the other
+ fields are blank.
+
+ For the function's children, the fields have the following meanings:
+
+     self	This is the amount of time that was propagated directly
+		from the child into the function.
+
+     children	This is the amount of time that was propagated from the
+		child's children to the function.
+
+     called	This is the number of times the function called
+		this child `/' the total number of times the child
+		was called.  Recursive calls by the child are not
+		listed in the number after the `/'.
+
+     name	This is the name of the child.  The child's index
+		number is printed after it.  If the child is a
+		member of a cycle, the cycle number is printed
+		between the name and the index number.
+
+ If there are any cycles (circles) in the call graph, there is an
+ entry for the cycle-as-a-whole.  This entry shows who called the
+ cycle (as parents) and the members of the cycle (as children.)
+ The `+' recursive calls entry shows the number of function calls that
+ were internal to the cycle, and the calls entry for each member shows,
+ for that member, how many times it was called from other members of
+ the cycle.
+
+Copyright (C) 2012-2023 Free Software Foundation, Inc.
+
+Copying and distribution of this file, with or without modification,
+are permitted in any medium without royalty provided the copyright
+notice and this notice are preserved.
+
+Index by function name
+
+  [11] L_2l_loop               [6] _ZSTD_buildFSETable   [138] _htonl
+  [22] L_al4both              [41] _ZSTD_decodeLiteralsBlock (zstd_decompress_block.c) [28] _irq_disable
+  [10] L_al4both_loop          [1] _ZSTD_decompressBlock_internal [46] _irq_restore
+  [15] L_al4dst               [50] _ZSTD_getcBlockSize    [47] _irqe_and
+   [5] L_al4src               [19] ___clzsi2               [2] _main
+  [14] L_cleanup              [43] ___newlib_lock_acquire_recursive [13] _maple_dev_status
+  [29] L_cleanup2             [24] ___sdivsi3_i4i         [48] _maple_enum_dev
+   [9] L_cleanup_loop         [25] ___sread               [16] _maple_enum_type
+  [12] L_even                 [21] ___srefill_r            [8] _memcpy
+  [23] L_odddst               [17] ___udivsi3_i4i         [44] _memset
+  [18] L_ready                [31] __fseeko_r             [27] _sbrk
+  [39] L_small                [32] _dcache_flush_range     [4] _snd_stream_poll
+  [42] _FSE_decompress_wksp_bmi2 [30] _dcload_read (fs_dcload.c) [49] _snd_stream_shutdown
+  [33] _FSE_readNCount       [137] _elf_free              [51] _spu_memset_sq
+  [37] _FSE_readNCount_bmi2   [40] _fs_read               [45] _sq_set32
+  [26] _HUF_readDTableX1_wksp [38] _g2_read_32            [54] _vma_table_600
+  [35] _HUF_readStats_wksp    [55] _g2_write_16
+   [3] _ZSTD_XXH64_digest     [36] _genwait_wait
