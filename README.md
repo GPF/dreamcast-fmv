@@ -3,7 +3,7 @@
 This is a proof-of-concept FMV (Full Motion Video) playback toolchain for the Sega Dreamcast.
 It includes:
 
-* `pack_dcmv`: a frame+audio packer using zlib (raw DEFLATE) compression
+* `pack_dcmv`: a frame+audio packer using LZ4 (LZ4_compress_HC) compression
 * `fmv_play.elf`: a Dreamcast player that decompresses and displays the video while streaming synced ADPCM audio
 * conversion tools using ffmpeg + `pvrtex` + `dcaconv`
 
@@ -19,15 +19,14 @@ It includes:
 ├── convert_to_pvr_fmv.sh       # Main conversion script (edit manually to configure input)
 ├── dcaconv                     # ADPCM encoder (built from TapamN's dcaconv repo)
 ├── pack_dcmv.c                 # Source for video+audio packer
-├── pack_dcmv                  # Compiled binary (use: `gcc -O2 pack_dcmv.c -o pack_dcmv -lzstd`)
+├── pack_dcmv                   # Compiled binary (use: `gcc -O2 pack_dcmv.c -o pack_dcmv -llz4`)
 ├── input/
 │   └── Your source .mp4 files (manually configured in convert_to_pvr_fmv.sh)
 ├── playdcmv/
 │   ├── fmv_play.c             # Dreamcast playback code (uses zlib, PVR, snd_stream)
 │   ├── fmv_play.elf           # Compiled player binary
-│   ├── movie.dcmv             # Final Dreamcast FMV file
-│   └── audio.dca              # ADPCM audio extracted from source
-└── readme.txt (legacy, can be deleted)
+└── └── movie.dcmv             # Final Dreamcast FMV file
+
 ```
 
 ## Dependencies
@@ -35,13 +34,14 @@ It includes:
 * **ffmpeg**: used to extract YUV frames and audio from MP4
 * **pvrtex**: builds VQ-compressed RGB565 Dreamcast textures (from KOS utils folder)
 * **dcaconv**: encodes WAV audio to Dreamcast ADPCM format ([https://github.com/TapamN/dcaconv](https://github.com/TapamN/dcaconv))
-* **zlib**: used for raw DEFLATE compression
+* **lz4**: used for LZ4_compress_HC compression([https://github.com/gyrovorbis/lz4](https://github.com/gyrovorbis/lz4))
 
 ## Usage
 
 1. Edit `convert_to_pvr_fmv.sh`:
 
-   * Set the input video path (e.g., `input/Dreamcast Startup (60fps).mp4`)
+   * Set the input video path (e.g., `input/Dreamcast Startup (60fps).mp4`) 
+   ([https://archive.org/details/dreamcaststartup60fps])
    * Adjust parameters like width, height, FPS, sample rate, channels, and audio bitrate
 2. Run the script:
 

@@ -1,5 +1,5 @@
 TARGET = fmv_play.elf
-OBJS = fmv_play.o profiler.o 
+OBJS = fmv_play.o #profiler.o 
 
 all: rm-elf $(TARGET)
 

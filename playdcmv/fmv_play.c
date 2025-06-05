@@ -1,3 +1,34 @@
+/**
+ * fmv_play.c - Dreamcast FMV (Full Motion Video) Player
+ * -----------------------------------------------------
+ * This is the runtime video player for .dcmv containers, designed for the Sega Dreamcast.
+ * It loads and decompresses LZ4-compressed VQ PVR textures on the fly and synchronizes
+ * them to ADPCM audio streamed via the KOS sound API.
+ *
+ * Features:
+ * - Parses custom DCMV v3 container format (video+audio in one file)
+ * - Uses LZ4 decompression for each video frame (compressed with LZ4-HC)
+ * - Leverages PVR DMA and VQ textures for efficient rendering
+ * - Streams audio using snd_stream with optional stereo/mono handling
+ * - Uses profiler integration for performance tuning
+ *
+ * Author: Troy Davis (GPF) — https://github.com/GPF
+ * License: Public Domain / MIT-style — use freely with attribution.
+ *
+ * Controls:
+ * - Press A: Take screenshot (/pc/screenshot#.ppm)
+ * - Press any other button: Exit cleanly
+ *
+ * Dependencies:
+ * - KallistiOS (KOS)
+ * - LZ4
+ * - libprofiler (optional, used for analysis)
+ *
+ * Related tools:
+ * - pack_dcmv (LZ4-based container builder)
+ * - convert_to_pvr_fmv.sh (FFmpeg + pvrtex + dcaconv automation)
+ */
+
 #include <kos.h>
 #include <dc/sound/stream.h>
 #include <dc/sound/sound.h>
@@ -7,11 +38,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <lz4/lz4.h>
-#include "profiler.h"
+// #include "profiler.h"
 
 
 #define DCMV_MAGIC "DCMV"
-#define VIDEO_FILE "/pc/movie.dcmv"
+#define VIDEO_FILE "/cd/movie.dcmv"
 
 static FILE *fp = NULL, *audio_fp = NULL;
 static uint8_t *frame_buffer = NULL, *compressed_buffer = NULL;
@@ -19,7 +50,7 @@ static size_t compressed_buffer_size = 0;
 static uint32_t *frame_offsets = NULL;
 
 static int frame_index = 0;
-static int video_width, video_height, fps, sample_rate, num_frames, video_frame_size, audio_channels, max_compressed_size;
+static int video_width, video_height, fps, sample_rate, num_frames, video_frame_size, audio_channels, max_compressed_size,audio_offset;
 static int audio_bytes_fed = 0;
 snd_stream_hnd_t stream;
 pvr_ptr_t pvr_txr;
@@ -44,7 +75,7 @@ static int load_header(void) {
     char magic[4];
     fread(magic, 1, 4, fp);
     if (memcmp(magic, DCMV_MAGIC, 4)) return -1;
-    printf("Magic %s",magic);
+    printf("Magic %s", magic);
     uint32_t version;
     fread(&version, 4, 1, fp);
     fread(&video_width, 2, 1, fp);
@@ -55,48 +86,26 @@ static int load_header(void) {
     fread(&num_frames, 4, 1, fp);
     fread(&video_frame_size, 4, 1, fp);
     fread(&max_compressed_size, 4, 1, fp);
+    fread(&audio_offset, 4, 1, fp);
 
-    printf("📦 Header: %dx%d @ %dfps, %dHz, %dch, %d frames, frame_size=%d, max_compressed_size=%d\n",
-           video_width, video_height, fps, sample_rate, audio_channels, num_frames, video_frame_size, max_compressed_size);
+    printf("📦 Header: %dx%d @ %dfps, %dHz, %dch, %d frames, frame_size=%d, max_compressed_size=%d, audio_offset=%d\n",
+           video_width, video_height, fps, sample_rate, audio_channels, num_frames, video_frame_size, max_compressed_size, audio_offset);
 
     return 0;
 }
 
 static int load_frame(int frame_num) {
     uint32_t offset = frame_offsets[frame_num];
+    uint32_t next_offset = frame_offsets[frame_num + 1];
+    uint32_t compressed_size = next_offset - offset;
+
     fseek(fp, offset, SEEK_SET);
-
-
-    uint32_t compressed_size;
-    if (fread(&compressed_size, 1, 4, fp) != 4) {
-        printf("❌ Failed to read compressed size\n");
-        return -1;
-    }
-
-    if (compressed_size > compressed_buffer_size) {
-        printf("❌ Compressed frame too large: %lu > %zu\n", compressed_size, compressed_buffer_size);
-        return -1;
-    }    
-
-    if (fread(compressed_buffer, 1, compressed_size, fp) != compressed_size) {
-        printf("❌ Failed to read compressed frame data (%lu bytes)\n", compressed_size);
-        return -1;
-    }
-
-    int decompressed = LZ4_decompress_safe(
+    fread(compressed_buffer, 1, compressed_size, fp);
+    
+    int decompressed = LZ4_decompress_fast(
         (const char *)compressed_buffer,
         (char *)frame_buffer,
-        compressed_size,
         video_frame_size);
-
-    if (decompressed < 0) {
-        printf("❌ LZ4 decompress failed on frame %d\n", frame_num);
-        return -1;
-    }
-    if (decompressed != video_frame_size) {
-        printf("❌ Unexpected decompressed size: got %d, expected=%d\n", decompressed, video_frame_size);
-        return -1;
-    }        
 
     pvr_txr_load_dma(frame_buffer, pvr_txr, video_frame_size, true, NULL, NULL);
     return 0;
@@ -113,24 +122,6 @@ static int init_pvr(void) {
                      PVR_TXRFMT_RGB565 | PVR_TXRFMT_TWIDDLED | PVR_TXRFMT_VQ_ENABLE,
                      video_width, video_height, pvr_txr, PVR_FILTER_BILINEAR);
     pvr_poly_compile(&hdr, &cxt);
-
-    // /* Set SQ to YUV converter. */
-    // PVR_SET(PVR_YUV_ADDR, (((unsigned int)pvr_txr) & 0xffffff));
-    // /* Divide PVR texture width and texture height by 16 and subtract 1. */
-    // PVR_SET(PVR_YUV_CFG, (0x01 << 24) | /* Set bit to specify 422 data format */
-    //                      (((video_height / 16) - 1) << 8) | 
-    //                      ((video_width / 16) - 1));
-    // /* Need to read once. */
-    // PVR_GET(PVR_YUV_CFG);
-
-    // pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY, 
-    //                 PVR_TXRFMT_YUV422 | PVR_TXRFMT_NONTWIDDLED, 
-    //                 video_width, video_height, 
-    //                 pvr_txr, 
-    //                 PVR_FILTER_BILINEAR);
-    // pvr_poly_compile(&hdr, &cxt);
-
-    // hdr.mode3 |= PVR_TXRFMT_STRIDE;    
 
     vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=0, .z=1, .u=0, .v=0, .argb=0xffffffff};
     vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=640, .y=0, .z=1, .u=1, .v=0, .argb=0xffffffff};
@@ -159,21 +150,31 @@ static void wait_exit(void) {
                 sprintf(screenshotfilename, "/pc/screenshot%d.ppm", frame_index);
                 vid_screen_shot(screenshotfilename);
             } else if (state->buttons){
-                            profiler_stop();
-                profiler_clean_up();
+                // profiler_stop();
+                // profiler_clean_up();
                 arch_exit();}
         }
     }
 }
 
-int main(void) {
-    profiler_init("/pc/gmon.out");
-    profiler_start();
+void *audio_poll_thread(void *p) {
+    while (1) {
+        snd_stream_poll(stream);
+        thd_sleep(10);  
+        wait_exit();
+
+    }
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    // profiler_init("/pc/gmon.out");
+    // profiler_start();
   
     fp = fopen(VIDEO_FILE, "rb");
     if (!fp || load_header() < 0) return -1;
     
-    frame_offsets = malloc(num_frames * sizeof(uint32_t));
+    frame_offsets = malloc((num_frames + 1) * sizeof(uint32_t));
     fread(frame_offsets, sizeof(uint32_t), num_frames, fp);
 
     // for (int i = 0; i < 10; ++i)
@@ -185,14 +186,7 @@ int main(void) {
         return -1;
     }
     compressed_buffer_size = max_compressed_size;
-    // printf("max_compressed_size=%d\n",max_compressed_size);
-    uint32_t last_offset = frame_offsets[num_frames - 1];
-    // printf("Last offset 0x%08lX\n",last_offset);
-    fseek(fp, last_offset, SEEK_SET);
-    uint32_t last_size;
-    fread(&last_size, 4, 1, fp);
-    // printf("last_size 0x%08lX\n",last_size);
-    size_t audio_offset = last_offset + 4 + last_size;
+
     printf("🔊 Calculated audio offset: 0x%zX\n", audio_offset);
 
     audio_fp = fopen(VIDEO_FILE, "rb");
@@ -210,24 +204,22 @@ int main(void) {
     audio_bytes_fed = 0;
 
     // Precompute bytes_per_frame as float
-    float samples_per_frame_f = (float)sample_rate / (float)fps;
-    float bytes_per_frame_f = samples_per_frame_f * ((float)audio_channels / 2.0f);
-
+    float bytes_per_sample = (float)audio_channels / 2.0f;
+    float inv_bytes_per_frame = (fps / (float)sample_rate) / bytes_per_sample; 
+    thd_create(1, audio_poll_thread, NULL);
     while (frame_index < num_frames) {
-        int should_be_frame = (int)((float)audio_bytes_fed / bytes_per_frame_f);
-        // printf("load frame %d, should_be_frame %d\n", frame_index, should_be_frame);
-        while (frame_index < should_be_frame && frame_index < num_frames) {
+        int should_be_frame = (int)((float)audio_bytes_fed * inv_bytes_per_frame);
+        int target_frame = should_be_frame < num_frames ? should_be_frame : num_frames;
+        while (frame_index < target_frame) {
             if (load_frame(frame_index) != 0) break;
             draw_frame();
             ++frame_index;
         }
-
-        snd_stream_poll(stream);
-        wait_exit();
+       
     }
 
-    profiler_stop();
-    profiler_clean_up();
+    // profiler_stop();
+    // profiler_clean_up();
     snd_stream_stop(stream);
     snd_stream_destroy(stream);
     pvr_mem_free(pvr_txr);
