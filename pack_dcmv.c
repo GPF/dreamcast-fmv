@@ -71,7 +71,6 @@ void write_header(FILE *out, uint8_t frame_type, uint16_t width, uint16_t height
     fwrite(&frame_size, 4, 1, out);
     fwrite(&max_compressed_size, 4, 1, out); // to be overwritten
     fwrite(&audio_offset, 4, 1, out);       // 34 (new!)
-    fwrite(&audio_offset, 4, 1, out);       // 34 (new!)
 }
 
 int main(int argc, char **argv) {

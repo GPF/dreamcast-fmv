@@ -22,7 +22,7 @@
  * Dependencies:
  * - KallistiOS (KOS)
  * - LZ4
- * - libprofiler (optional, used for analysis)
+ * - dcprofiler (optional, used for analysis)
  *
  * Related tools:
  * - pack_dcmv (LZ4-based container builder)
@@ -58,12 +58,8 @@ char screenshotfilename[256];
 
 static uint8_t *frame_buffer;
 static volatile int ready_buffer = -1;
-static int preload_frame = 0;
-static volatile int preload_done = 0;
 static volatile int audio_started = 0;
-static uint16_t spos = 0;
-static uint32_t audio_played_bytes = 0;
-int soundbufferalloc = 4096;
+int soundbufferalloc = 8192;
 static volatile float current_audio_frame = 0;
 
 static int load_frame(int frame_num) {
@@ -74,7 +70,7 @@ static int load_frame(int frame_num) {
     fseek(fp, offset, SEEK_SET);
     fread(compressed_buffer, 1, compressed_size, fp);
     
-    int decompressed = LZ4_decompress_fast(
+    LZ4_decompress_fast(
         (const char *)compressed_buffer,
         (char *)frame_buffer,
         video_frame_size);
@@ -242,15 +238,18 @@ int main(int argc, char **argv) {
 
     // Initialize audio stream
     snd_stream_init();
-    stream = snd_stream_alloc(NULL, soundbufferalloc);
+    stream = snd_stream_alloc(NULL, soundbufferalloc/2);
     snd_stream_set_callback_direct(stream, audio_cb);
     snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
+    audio_bytes_fed = 0;
 
-    // Create audio polling thread
-    thd_create(1, audio_poll_thread, NULL);
     // Precompute bytes_per_frame as float
     float bytes_per_sample = (float)audio_channels / 2.0f;
     float inv_bytes_per_frame = (fps / (float)sample_rate) / bytes_per_sample; 
+
+    // Create audio polling thread
+    thd_create(0, audio_poll_thread, NULL);
+
     // Frame rendering loop
     while (frame_index < num_frames) {
         int should_be_frame = (int)((float)audio_bytes_fed * inv_bytes_per_frame);
