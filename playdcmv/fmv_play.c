@@ -51,6 +51,7 @@ static int frame_index = 0;
 static int frame_type, video_width, video_height, fps, sample_rate, num_frames, video_frame_size, audio_channels, max_compressed_size, audio_offset;
 static int audio_bytes_fed = 0;
 snd_stream_hnd_t stream;
+static kthread_t *audio_thread;
 pvr_ptr_t pvr_txr;
 pvr_poly_hdr_t hdr;
 pvr_vertex_t vert[4];
@@ -59,7 +60,7 @@ char screenshotfilename[256];
 static uint8_t *frame_buffer;
 static volatile int ready_buffer = -1;
 static volatile int audio_started = 0;
-int soundbufferalloc = 8192;
+int soundbufferalloc = 4096;
 static volatile float current_audio_frame = 0;
 
 static int load_frame(int frame_num) {
@@ -75,7 +76,6 @@ static int load_frame(int frame_num) {
         (char *)frame_buffer,
         video_frame_size);
 
-    pvr_txr_load_dma(frame_buffer, pvr_txr, video_frame_size, true, NULL, NULL);
     return 0;
 }
 
@@ -159,8 +159,13 @@ static int init_pvr(int frame_type) {
 
 void draw_frame() {
     if (frame_type == 1) {
-        pvr_dma_transfer(frame_buffer, PVR_TA_YUV_CONV, video_frame_size, PVR_DMA_YUV, true, NULL, NULL);
+        // dcache_flush_range((uintptr_t)frame_buffer, (uintptr_t)(frame_buffer + video_frame_size));
+        // pvr_dma_transfer(frame_buffer, PVR_TA_YUV_CONV, video_frame_size, PVR_DMA_YUV, true, NULL, NULL);
+        // sq_cpy((void *)0x10800000, (void *)frame_buffer, video_frame_size);
+        pvr_sq_load(NULL, frame_buffer, video_frame_size, PVR_DMA_YUV);
+        
     } else {
+        // dcache_flush_range((uintptr_t)pvr_txr, (uintptr_t)(frame_buffer + video_frame_size));
         pvr_txr_load(frame_buffer, pvr_txr, video_frame_size);
     }
 
@@ -169,13 +174,23 @@ void draw_frame() {
     pvr_dr_state_t dr;
     pvr_dr_init(&dr);
     pvr_poly_hdr_t *hdr_ptr = (pvr_poly_hdr_t *)pvr_dr_target(dr);
-    sq_cpy(hdr_ptr, &hdr, sizeof(pvr_poly_hdr_t));
+    memcpy(hdr_ptr, &hdr, sizeof(pvr_poly_hdr_t));
     pvr_dr_commit(hdr_ptr);
-    for (int i = 0; i < 4; ++i) {
-        pvr_vertex_t *v = (pvr_vertex_t *)pvr_dr_target(dr);
-        *v = vert[i];
-        pvr_dr_commit(v);
-    }
+    pvr_vertex_t *v = (pvr_vertex_t *)pvr_dr_target(dr);
+    *v = vert[0];
+    pvr_dr_commit(v);
+
+    v = (pvr_vertex_t *)pvr_dr_target(dr);
+    *v = vert[1];
+    pvr_dr_commit(v);
+
+    v = (pvr_vertex_t *)pvr_dr_target(dr);
+    *v = vert[2];
+    pvr_dr_commit(v);
+
+    v = (pvr_vertex_t *)pvr_dr_target(dr);
+    *v = vert[3];
+    pvr_dr_commit(v);
     pvr_dr_finish();
     pvr_list_finish();
     pvr_scene_finish();
@@ -206,7 +221,7 @@ static void wait_exit(void) {
 void *audio_poll_thread(void *p) {
     while (1) {
         snd_stream_poll(stream);
-        thd_sleep(10);  
+        thd_sleep(40);  
         wait_exit();
 
     }
@@ -214,6 +229,8 @@ void *audio_poll_thread(void *p) {
 }
 
 int main(int argc, char **argv) {
+    // profiler_init("/pc/gmon.out");
+    // profiler_start();
     fp = fopen(VIDEO_FILE, "rb");
     if (!fp || load_header() < 0) return -1;
 
@@ -238,17 +255,17 @@ int main(int argc, char **argv) {
 
     // Initialize audio stream
     snd_stream_init();
-    stream = snd_stream_alloc(NULL, soundbufferalloc/2);
+    stream = snd_stream_alloc(NULL, soundbufferalloc);
     snd_stream_set_callback_direct(stream, audio_cb);
     snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
-    audio_bytes_fed = 0;
+    // audio_bytes_fed = 0;
 
     // Precompute bytes_per_frame as float
     float bytes_per_sample = (float)audio_channels / 2.0f;
     float inv_bytes_per_frame = (fps / (float)sample_rate) / bytes_per_sample; 
 
     // Create audio polling thread
-    thd_create(0, audio_poll_thread, NULL);
+    audio_thread = thd_create(0, audio_poll_thread, NULL);
 
     // Frame rendering loop
     while (frame_index < num_frames) {
@@ -260,8 +277,10 @@ int main(int argc, char **argv) {
             ++frame_index;
         }
     }
-
+    // profiler_stop();
+    // profiler_clean_up();
     // Clean up
+    thd_join(audio_thread, NULL);
     snd_stream_stop(stream);
     snd_stream_destroy(stream);
     fclose(fp);

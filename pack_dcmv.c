@@ -53,7 +53,7 @@
 #include <lz4hc.h>
 #include <lz4hc.h>
 
-#define MAX_FRAMES 10000
+#define MAX_FRAMES 99999
 #define FRAME_FILENAME_MAX 256
 
 void write_header(FILE *out, uint8_t frame_type, uint16_t width, uint16_t height, uint16_t fps, uint16_t sample_rate,
