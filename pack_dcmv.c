@@ -51,15 +51,17 @@
 #include <errno.h>
 #include <lz4.h>
 #include <lz4hc.h>
+#include <lz4hc.h>
 
 #define MAX_FRAMES 10000
 #define FRAME_FILENAME_MAX 256
 
-void write_header(FILE *out, uint16_t width, uint16_t height, uint16_t fps, uint16_t sample_rate,
+void write_header(FILE *out, uint8_t frame_type, uint16_t width, uint16_t height, uint16_t fps, uint16_t sample_rate,
                   uint16_t channels, uint32_t num_frames, uint32_t frame_size, uint32_t max_compressed_size, uint32_t audio_offset) {
     fwrite("DCMV", 1, 4, out);
     uint32_t version = 3;
     fwrite(&version, 4, 1, out);
+    fwrite(&frame_type, 1, 1, out);
     fwrite(&width, 2, 1, out);
     fwrite(&height, 2, 1, out);
     fwrite(&fps, 2, 1, out);
@@ -69,22 +71,24 @@ void write_header(FILE *out, uint16_t width, uint16_t height, uint16_t fps, uint
     fwrite(&frame_size, 4, 1, out);
     fwrite(&max_compressed_size, 4, 1, out); // to be overwritten
     fwrite(&audio_offset, 4, 1, out);       // 34 (new!)
+    fwrite(&audio_offset, 4, 1, out);       // 34 (new!)
 }
 
 int main(int argc, char **argv) {
-    if (argc != 9) {
-        printf("Usage: %s <output.dcmv> <width> <height> <fps> <sample_rate> <channels> <frame_pattern> <audio_file>\n", argv[0]);
+    if (argc != 10) {
+        printf("Usage: %s <output.dcmv> <frame_type 0=RGB565, 1=YUV420P> <width> <height> <fps> <sample_rate> <channels> <frame_pattern> <audio_file>\n", argv[0]);
         return 1;
     }
 
     const char *output_path = argv[1];
-    uint16_t width = atoi(argv[2]);
-    uint16_t height = atoi(argv[3]);
-    uint16_t fps = atoi(argv[4]);
-    uint16_t sample_rate = atoi(argv[5]);
-    uint16_t channels = atoi(argv[6]);
-    const char *frame_pattern = argv[7];
-    const char *audio_path = argv[8];
+    uint16_t frame_type = atoi(argv[2]);
+    uint16_t width = atoi(argv[3]);
+    uint16_t height = atoi(argv[4]);
+    uint16_t fps = atoi(argv[5]);
+    uint16_t sample_rate = atoi(argv[6]);
+    uint16_t channels = atoi(argv[7]);
+    const char *frame_pattern = argv[8];
+    const char *audio_path = argv[9];
     printf("audio path = %s\n", audio_path);
     FILE *audio_fp = fopen(audio_path, "rb");
     if (!audio_fp) { perror("Audio open failed"); return 1; }
@@ -120,62 +124,88 @@ int main(int argc, char **argv) {
         fprintf(stderr, "Failed to open first frame\n");
         return 1;
     }
-    fseek(first_fp, 0, SEEK_END);
-    size_t original_size = ftell(first_fp);
-    rewind(first_fp);
-    uint8_t *raw_buf = malloc(original_size);
-    fread(raw_buf, 1, original_size, first_fp);
-    fclose(first_fp);
-
     uint32_t skip = 0;
-    if (memcmp(raw_buf, "DcTx", 4) == 0) {
-        uint8_t header_size = raw_buf[9];
-        skip = (header_size + 1) * 32;
-    } else if (memcmp(raw_buf, "DTEX", 4) == 0 || memcmp(raw_buf, "PVRT", 4) == 0) {
-        skip = 0x10;
-    } else {
-        fprintf(stderr, "Unknown texture format in frame 0\n");
-        return 1;
-    }
-
-    size_t src_len = original_size - skip;
+    size_t frame_size = 0;
+    uint8_t *raw_buf = NULL;
 
     FILE *out = fopen(output_path, "wb+");
     if (!out) { perror("Output open failed"); return 1; }
 
-    // write_header(out, width, height, fps, sample_rate, channels, frame_count, src_len, 0, 0);
-    fseek(out, 38, SEEK_SET);   
-    long offset_table_pos = ftell(out);                      // first offset table
+    fseek(out, 43, SEEK_SET);   // size of DCMV header
+    long offset_table_pos = ftell(out);  // where offset table starts
     fseek(out, (frame_count + 1) * sizeof(uint32_t), SEEK_CUR);
 
-    uint32_t *offsets = malloc((frame_count+1) * sizeof(uint32_t));
+    uint32_t *offsets = malloc((frame_count + 1) * sizeof(uint32_t));
     if (!offsets) {
         fprintf(stderr, "OOM\n");
         return 1;
     }
 
     uint32_t max_compressed_size = 0;
+
     for (int i = 0; i < frame_count; ++i) {
         snprintf(filename, sizeof(filename), frame_pattern, i);
         FILE *fp = fopen(filename, "rb");
+        if (!fp) {
+            fprintf(stderr, "Failed to open frame %d\n", i);
+            return 1;
+        }
+
+        fseek(fp, 0, SEEK_END);
+        size_t original_size = ftell(fp);
+        rewind(fp);
+
+        if (!raw_buf || original_size > 0x100000) {
+            raw_buf = realloc(raw_buf, original_size);
+            if (!raw_buf) {
+                perror("Failed to realloc raw_buf");
+                return 1;
+            }
+        }
+
         fread(raw_buf, 1, original_size, fp);
         fclose(fp);
 
+        // Handle skip logic on frame 0 only (only relevant for RGB565)
+        if (i == 0) {
+            if (frame_type == 0) {
+                if (memcmp(raw_buf, "DcTx", 4) == 0) {
+                    uint8_t header_size = raw_buf[9];
+                    skip = (header_size + 1) * 32;
+                } else if (memcmp(raw_buf, "DTEX", 4) == 0 || memcmp(raw_buf, "PVRT", 4) == 0) {
+                    skip = 0x10;
+                } else {
+                    fprintf(stderr, "Unknown texture format in frame 0 (expected RGB565+header)\n");
+                    return 1;
+                }
+            } else {
+                skip = 0;
+            }
+
+            frame_size = original_size - skip;  // store first frame's usable size
+        }
+
+        size_t src_len = original_size - skip;
         uint8_t *src = raw_buf + skip;
+
         int bound = LZ4_compressBound(src_len);
         uint8_t *comp = malloc(bound);
+        if (!comp) {
+            perror("Failed to malloc comp");
+            return 1;
+        }
+
         int comp_size = LZ4_compress_HC((const char *)src, (char *)comp, src_len, bound, 12);
         if (comp_size <= 0) {
             fprintf(stderr, "LZ4 compression failed on frame %d\n", i);
             return 1;
         }
-   
+        // printf("comp size=%d, max_compress_size so far=%d\n",comp_size, max_compressed_size);
         offsets[i] = ftell(out);
         if (comp_size > max_compressed_size)
             max_compressed_size = comp_size;
 
-        // fwrite(&comp_size, 4, 1, out);        // dont need the compressed size stored for lz4
-        fwrite(comp, 1, comp_size, out);      // Store compressed data
+        fwrite(comp, 1, comp_size, out);
         free(comp);
             // printf("filename%d = %s\n",i, filename);
     }
@@ -186,7 +216,7 @@ int main(int argc, char **argv) {
     // fseek(out, 0x1A, SEEK_SET);
     
     // fwrite(&max_compressed_size, 4, 1, out);
-    // printf("📏 max_compressed_size written to header: %u\n", max_compressed_size);
+    printf("📏 max_compressed_size written to header: %u\n", max_compressed_size);
 
     uint32_t audio_offset = ftell(out); // <- this is the real offset
     printf("📏 audio_offset written to header: 0x%X\n", audio_offset);    
@@ -203,8 +233,8 @@ int main(int argc, char **argv) {
 
     // Finally patch header
     fseek(out, 0, SEEK_SET);
-    write_header(out, width, height, fps, sample_rate, channels, frame_count,
-                src_len, max_compressed_size, audio_offset);        
+    write_header(out, frame_type, width, height, fps, sample_rate, channels, frame_count,
+                frame_size, max_compressed_size, audio_offset);        
     fclose(audio_fp);
     fclose(out);
     free(offsets);

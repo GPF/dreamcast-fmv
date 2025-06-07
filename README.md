@@ -20,6 +20,7 @@ It includes:
 ├── dcaconv                     # ADPCM encoder (built from TapamN's dcaconv repo)
 ├── pack_dcmv.c                 # Source for video+audio packer
 ├── pack_dcmv                   # Compiled binary (use: `gcc -O2 pack_dcmv.c -o pack_dcmv -llz4`)
+├── yuv420converter             # Compiled binary (use: `gcc -O2 -o yuv420converter yuv420converter.c`)
 ├── input/
 │   └── Your source .mp4 files (manually configured in convert_to_pvr_fmv.sh)
 ├── playdcmv/

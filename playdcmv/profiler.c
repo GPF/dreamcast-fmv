@@ -1,445 +1,220 @@
-#include <stdbool.h>
-#include <assert.h>
-#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
-#include <dirent.h>
 
 #include <kos/thread.h>
-#include <dc/fs_dcload.h>
+#include <kos/mutex.h>
+#include <arch/timer.h>
 
-static char OUTPUT_FILENAME[128];
-static kthread_t* THREAD;
-static volatile bool PROFILER_RUNNING = false;
-static volatile bool PROFILER_RECORDING = false;
+#include <dc/perf_monitor.h>
 
-#define BASE_ADDRESS 0x8c010000
-#define BUCKET_SIZE 10000
+/*
+ * Dreamcast Function Profiler – Low-overhead instrumentation for function entry/exit
+ * Works in tandem with GCC’s -finstrument-functions.
+ *
+ * This profiler:
+ *   ✓ Captures timestamps and performance counters (PRFC0 / PRFC1)
+ *   ✓ Computes deltas since the last call per-thread
+ *   ✓ Compresses data using unsigned LEB128 encoding
+ *   ✓ Divides time deltas by 80 (to match 80ns tick resolution)
+ *   ✓ Writes compact variable-length records to /pc/trace.bin via dcload
+ *
+ * Binary Record Format (per function entry or exit):
+ *   uint32_t address
+ *     - Bit 31: 1 for entry, 0 for exit
+ *     - Bits 30–22: thread ID
+ *     - Bits 21–0: compressed function address (>>2 from 0x8C000000)
+ *
+ *   LEB128 encoded values (1–5 bytes each):
+ *     - scaled_time:   delta time / 80ns
+ *     - delta_evt0:    delta of PRFC0 (e.g., operand cache misses)
+ *     - delta_evt1:    delta of PRFC1 (e.g., instruction cache misses)
+ *
+ * Memory & Performance:
+ *   - Each thread maintains its own 8KB TLS buffer, flushed when full
+ *   - All instrumentation functions are marked __no_instrument_function to avoid recursion
+ *   - No dynamic allocations; aligned buffers for safe unaligned writes
+ *
+ * Initialization:
+ *   - File opened at startup via constructor (main_constructor)
+ *   - Counters started and cleared
+ *   - Cleanup handler registered with atexit()
+ *
+ * Cleanup:
+ *   - Flushes remaining buffer contents
+ *   - Stops and clears hardware counters
+ *   - Closes trace file
+ *
+ * Paired with `dctrace.py` to decode, resolve symbols, and generate call graphs.
+ */
 
-#define INTERVAL_IN_MS 10
+/* Use TLS to keep things separate */ 
+#define thread_local _Thread_local
 
-/* Simple hash table of samples. An array of Samples
- * but, each sample in that array can be the head of
- * a linked list of other samples */
-typedef struct Arc {
-    uint32_t pc;
-    uint32_t pr; // Caller return address
-    uint32_t count;
-    struct Arc* next;
-} Arc;
+#define BUFFER_SIZE    (1024 * 8)
 
-static Arc ARCS[BUCKET_SIZE];
+#define ENTRY_FLAG     0x80000000
+#define EXIT_FLAG      0x00000000
 
-/* Hashing function for two uint32_ts */
-#define HASH_PAIR(x, y) ((x * 0x1f1f1f1f) ^ y)
+#define BASE_ADDRESS   0x8C000000
+#define TID_MASK       0x1FF       /* 9 bits */
+#define ADDR_MASK      0x003FFFFF  /* 22 bits (compressed address) */
 
-#define BUFFER_SIZE (1024 * 8)  // 8K buffer
+#define MAX_ENTRY_SIZE 19
 
-const static size_t MAX_ARC_COUNT = BUFFER_SIZE / sizeof(Arc);
-static size_t ARC_COUNT = 0;
+#define MAKE_ADDRESS(entry, tid, full_addr) \
+     (((entry) ? ENTRY_FLAG : 0) | \
+     (((tid) & TID_MASK) << 22) | \
+     (((((uint32_t)(full_addr)) - BASE_ADDRESS) >> 2) & ADDR_MASK))
 
-static bool WRITE_TO_STDOUT = false;
+static int fd;
+static FILE *fp;
+static mutex_t io_lock = MUTEX_INITIALIZER;
 
-static bool write_samples(const char* path);
-static bool write_samples_to_stdout();
-static void clear_samples();
+/* TLS buffer management */
+static thread_local uint8_t *tls_ptr;
+static thread_local size_t   tls_buffer_idx;
+static thread_local uint8_t  tls_buffer[BUFFER_SIZE] __attribute__((aligned(32)));
 
-static Arc* new_arc(uint32_t PC, uint32_t PR) {
-    Arc* s = (Arc*) malloc(sizeof(Arc));
-    s->count = 1;
-    s->pc = PC;
-    s->pr = PR;
-    s->next = NULL;
+/* TLS stats management */
+static thread_local bool     tls_inited;
+static thread_local uint32_t tls_thread_id;
+static thread_local uint64_t tls_last_time;
+static thread_local uint64_t tls_last_event0;
+static thread_local uint64_t tls_last_event1;
 
-    ++ARC_COUNT;
-
-    return s;
+static inline void  __attribute__ ((no_instrument_function)) write_u32_unaligned(uint8_t *dst, uint32_t value) {
+    dst[0] = (uint8_t)(value & 0xFF);
+    dst[1] = (uint8_t)((value >> 8) & 0xFF);
+    dst[2] = (uint8_t)((value >> 16) & 0xFF);
+    dst[3] = (uint8_t)((value >> 24) & 0xFF);
 }
 
-static void record_thread(uint32_t PC, uint32_t PR) {
-    uint32_t bucket = HASH_PAIR(PC, PR) % BUCKET_SIZE;
+static size_t __attribute__ ((no_instrument_function)) encode_uleb128(uint32_t value, uint8_t *out) {
+    /* Fast path: single-byte encoding (value < 128).
+     * Very common for scaled_time and event deltas. */
+    if (value < 0x80) {
+        out[0] = (uint8_t)value;
+        return 1;
+    }
 
-    Arc* s = &ARCS[bucket];
+    size_t count = 0;
+    do {
+        uint8_t byte = value & 0x7F;
+        value >>= 7;
+        if(value != 0)
+            byte |= 0x80;
+        out[count++] = byte;
+    } while (value != 0);
 
-    if(s->pc) {
-        /* Initialized sample in this bucket,
-         * does it match though? */
-        while(s->pc != PC || s->pr != PR) {
-            if(s->next) {
-                s = s->next;
-            } else {
-                s->next = new_arc(PC, PR);
-                return; // We're done
-            }
-        }
+    return count;
+}
 
-        s->count++;
-    } else {
-        /* Initialize this sample */
-        s->count = 1;
-        s->pc = PC;
-        s->pr = PR;
-        s->next = NULL;
-        ++ARC_COUNT;
+static void __attribute__ ((no_instrument_function)) init_tls(void) {
+    kthread_t *th = thd_get_current();
+    tls_thread_id = th->tid & TID_MASK; /* Reserve bit 31 for entry/exit */
+    tls_buffer_idx = 0;
+    tls_ptr = tls_buffer;
+    tls_last_time = timer_ns_gettime64();
+    tls_last_event0 = perf_cntr_count(PRFC0);
+    tls_last_event1 = perf_cntr_count(PRFC1);
+
+    tls_inited = true;
+}
+
+static void __attribute__ ((no_instrument_function, hot)) create_entry(void *this, uint32_t flag) {
+    if(__unlikely(!tls_inited))
+        init_tls();
+    
+    uint64_t now = timer_ns_gettime64();
+    uint64_t e0  = perf_cntr_count(PRFC0);
+    uint64_t e1  = perf_cntr_count(PRFC1);
+
+    uint32_t diff_evt0 = (uint32_t)(e0 - tls_last_event0);
+    uint32_t diff_evt1 = (uint32_t)(e1 - tls_last_event1);
+    uint32_t delta_time = (uint32_t)(now - tls_last_time);
+
+    /* Scale delta_time down to 80ns units (the resolution of timer_ns_gettime64()) */
+    uint32_t scaled_time = delta_time / 80;
+
+    /* Write record byte by byte */
+    uint32_t addr = MAKE_ADDRESS(flag, tls_thread_id, this);
+    write_u32_unaligned(tls_ptr, addr);
+    tls_ptr += 4;
+    tls_ptr += encode_uleb128(scaled_time, tls_ptr);
+    tls_ptr += encode_uleb128(diff_evt0, tls_ptr);
+    tls_ptr += encode_uleb128(diff_evt1, tls_ptr);
+
+    /* Advance this thread’s buffer */
+    tls_buffer_idx = tls_ptr - tls_buffer;
+
+    /* Update for next delta */
+    tls_last_time = now;
+    tls_last_event0 = e0;
+    tls_last_event1 = e1;
+
+    /* When this thread’s buffer is full, flush under lock */
+    if(__unlikely(tls_buffer_idx >= BUFFER_SIZE - MAX_ENTRY_SIZE)) {
+        mutex_lock(&io_lock);
+        write(fd, tls_buffer, tls_buffer_idx);
+        mutex_unlock(&io_lock);
+        tls_ptr = tls_buffer;
+        tls_buffer_idx = 0;
     }
 }
 
-static int thd_each_cb(kthread_t* thd, void* data) {
-    (void) data;
-
-
-    /* Only record the main thread (for now) */
-    if(strcmp(thd->label, "[kernel]") != 0) {
-        return 0;
+static void __attribute__ ((no_instrument_function)) cleanup(void) {
+    if(tls_buffer_idx > 0) {
+        mutex_lock(&io_lock);
+        write(fd, tls_buffer, tls_buffer_idx);
+        mutex_unlock(&io_lock);
     }
+    
+    perf_cntr_stop(PRFC0);
+    perf_cntr_stop(PRFC1);
 
-    /* The idea is that if this code right here is running in the profiling
-     * thread, then all the PCs from the other threads are
-     * current. Obviouly thought between iterations the
-     * PC will change so it's not like this is a true snapshot
-     * in time across threads */
-    uint32_t PC = thd->context.pc;
-    uint32_t PR = thd->context.pr;
-    record_thread(PC, PR);
-    return 0;
-}
+    perf_cntr_clear(PRFC0);
+    perf_cntr_clear(PRFC1);
 
-static void record_samples() {
-    /* Go through all the active threads and increase
-     * the sample count for the PC for each of them */
-
-    size_t initial = ARC_COUNT;
-
-    thd_each(&thd_each_cb, NULL);
-
-    if(ARC_COUNT >= MAX_ARC_COUNT) {
-        /* TIME TO FLUSH! */
-        if(!write_samples(OUTPUT_FILENAME)) {
-            fprintf(stderr, "Error writing samples\n");
-        }
-    }
-
-    /* We log when the number of PCs recorded hits a certain increment */
-    if((initial != ARC_COUNT) && ((ARC_COUNT % 1000) == 0)) {
-        printf("-- %d arcs recorded...\n", ARC_COUNT);
+    if(fp != NULL) {
+        fclose(fp);
+        fp = NULL;
     }
 }
 
-/* Declared in KOS in fs_dcload.c */
-int fs_dcload_detected();
-extern int dcload_type;
+void __attribute__ ((no_instrument_function, hot)) __cyg_profile_func_enter(void *this, void *callsite) {
+    (void)callsite;
 
+    if(__unlikely(fp == NULL))
+        return;
 
-#define GMON_COOKIE "gmon"
-#define GMON_VERSION 1
-
-typedef struct {
-    char cookie[4];  // 'g','m','o','n'
-    int32_t version; // 1
-    char spare[3 * 4]; // Padding
-} GmonHeader;
-
-typedef struct {
-    uint32_t low_pc;
-    uint32_t high_pc;
-    uint32_t hist_size;
-    uint32_t prof_rate;
-    char dimen[15];			/* phys. dim., usually "seconds" */
-    char dimen_abbrev;			/* usually 's' for "seconds" */
-} GmonHistHeader;
-
-typedef struct {
-    unsigned char tag; // GMON_TAG_TIME_HIST = 0, GMON_TAG_CG_ARC = 1, GMON_TAG_BB_COUNT = 2
-    size_t ncounts; // Number of address/count pairs in this sequence
-} GmonBBHeader;
-
-typedef struct {
-    uint32_t from_pc;	/* address within caller's body */
-    uint32_t self_pc;	/* address within callee's body */
-    uint32_t count;			/* number of arc traversals */
-} GmonArc;
-
-static bool init_sample_file(const char* path) {
-    printf("Detecting dcload... ");
-
-    if(!fs_dcload_detected() && dcload_type != DCLOAD_TYPE_NONE) {
-        printf("[Not Found]\n");
-        WRITE_TO_STDOUT = true;
-        return false;
-    } else {
-        printf("[Found]\n");
-    }
-
-    FILE* out = fopen(path, "w");
-    if(!out) {
-        WRITE_TO_STDOUT = true;
-        return false;
-    }
-
-    /* Write the GMON header */
-
-    GmonHeader header;
-    memcpy(&header.cookie[0], GMON_COOKIE, sizeof(header.cookie));
-    header.version = 1;
-    memset(header.spare, '\0', sizeof(header.spare));
-
-    fwrite(&header, sizeof(header), 1, out);
-
-    fclose(out);
-    return true;
+    create_entry(this, ENTRY_FLAG);
 }
 
-#define ROUNDDOWN(x,y) (((x)/(y))*(y))
-#define ROUNDUP(x,y) ((((x)+(y)-1)/(y))*(y))
+void __attribute__ ((no_instrument_function, hot)) __cyg_profile_func_exit(void *this, void *callsite) {
+    (void)callsite;
 
-static bool write_samples(const char* path) {
-    /* Appends the samples to the output file in gmon format
-     *
-     * We iterate the data twice, first generating arcs, then generating
-     * basic block counts. While we do that though we calculate the data
-     * for the histogram so we don't need a third iteration */
+    if(__unlikely(fp == NULL))
+        return;
 
-    if(WRITE_TO_STDOUT) {
-        write_samples_to_stdout();
-        return true;
-    }
-
-    extern char _etext;
-
-    const uint32_t HISTFRACTION = 8;
-
-    /* We know the lowest address, it's the same for all DC games */
-    uint32_t lowest_address = ROUNDDOWN(BASE_ADDRESS, HISTFRACTION);
-
-    /* We need to calculate the highest address though */
-    uint32_t highest_address = ROUNDUP((uint32_t) &_etext, HISTFRACTION);
-
-    /* Histogram data */
-    const int BIN_COUNT = ((highest_address - lowest_address) / HISTFRACTION);
-    uint16_t* bins = (uint16_t*) malloc(BIN_COUNT * sizeof(uint16_t));
-    memset(bins, 0, sizeof(uint16_t) * BIN_COUNT);
-
-    FILE* out = fopen(path, "a");  /* Append, as init_sample_file would have created the file */
-    if(!out) {
-        fprintf(stderr, "-- Error writing samples to output file\n");
-        return false;
-    }
-
-    printf("-- Writing %d arcs\n", ARC_COUNT);
-
-    uint8_t tag = 1;
-
-#ifndef NDEBUG
-    size_t written = 0;
-#endif
-
-    /* Write arcs */
-    Arc* root = ARCS;
-    for(int i = 0; i < BUCKET_SIZE; ++i) {        
-        if(root->pc) {
-            GmonArc arc;
-            arc.from_pc = root->pr;
-            arc.self_pc = root->pc;
-            arc.count = root->count;
-
-            /* Write the root sample if it has a program counter */
-            fwrite(&tag, sizeof(tag), 1, out);
-            fwrite(&arc, sizeof(GmonArc), 1, out);
-
-#ifndef NDEBUG
-            ++written;
-#endif
-
-            /* If there's a next pointer, traverse the list */
-            Arc* s = root->next;
-            while(s) {
-                arc.from_pc = s->pr;
-                arc.self_pc = s->pc;
-                arc.count = s->count;
-
-                /* Write the root sample if it has a program counter */
-                fwrite(&tag, sizeof(tag), 1, out);
-                fwrite(&arc, sizeof(GmonArc), 1, out);
-
-#ifndef NDEBUG
-                ++written;
-#endif
-
-                s = s->next;
-            }
-        }
-
-        root++;
-    }
-
-    uint32_t histogram_range = highest_address - lowest_address;
-    uint32_t bin_size = histogram_range / BIN_COUNT;
-
-    root = ARCS;
-    for(int i = 0; i < BUCKET_SIZE; ++i) {
-        if(root->pc) {
-            printf("Incrementing %ld for %x. ", (root->pc - lowest_address) / bin_size, (unsigned int) root->pc);
-            bins[(root->pc - lowest_address) / bin_size]++;
-            printf("Now: %d\n", (int) bins[(root->pc - lowest_address) / bin_size]);
-
-            /* If there's a next pointer, traverse the list */
-            Arc* s = root->next;
-            while(s) {
-                assert(s->pc);
-                bins[(s->pc - lowest_address) / bin_size]++;
-                s = s->next;
-            }
-        }
-
-        root++;
-    }
-
-
-    /* Write histogram now that we have all the information we need */
-    GmonHistHeader hist_header;
-    hist_header.low_pc = lowest_address;
-    hist_header.high_pc = highest_address;
-    hist_header.hist_size = BIN_COUNT;
-    hist_header.prof_rate = INTERVAL_IN_MS;
-    strcpy(hist_header.dimen, "seconds");
-    hist_header.dimen_abbrev = 's';
-
-    unsigned char hist_tag = 0;
-    fwrite(&hist_tag, sizeof(hist_tag), 1, out);
-    fwrite(&hist_header, sizeof(hist_header), 1, out);
-    fwrite(bins, sizeof(uint16_t), BIN_COUNT, out);
-
-    fclose(out);
-    free(bins);
-
-    /* We should have written all the recorded samples */
-    assert(written == ARC_COUNT);
-
-    clear_samples();
-
-    return true;
+    create_entry(this, EXIT_FLAG);
 }
 
-static bool write_samples_to_stdout() {
-    /* Write samples to stdout as a CSV file
-     * for processing */
-
-    printf("--------------\n");
-    printf("\"PC\", \"PR\", \"COUNT\"\n");
-
-    Arc* root = ARCS;
-    for(int i = 0; i < BUCKET_SIZE; ++i) {
-        Arc* s = root;
-        while(s->next) {
-            printf("\"%x\", \"%x\", \"%d\"\n", (unsigned int) s->pc, (unsigned int) s->pr, (unsigned int) s->count);
-            s = s->next;
-        }
-
-        root++;
-    }
-
-    printf("--------------\n");
-
-    return true;
-}
-
-
-static void* run(void* args) {
-    printf("-- Entered profiler thread!\n");
-
-    while(PROFILER_RUNNING){
-        if(PROFILER_RECORDING) {
-            record_samples();
-            usleep(INTERVAL_IN_MS * 1000); //usleep takes milliseconds
-        }
-    }
-
-    printf("-- Profiler thread finished!\n");
-
-    return NULL;
-}
-
-void profiler_init(const char* output) {
-    /* Store the filename */
-    strncpy(OUTPUT_FILENAME, output, sizeof(OUTPUT_FILENAME) - 1);
-    OUTPUT_FILENAME[sizeof(OUTPUT_FILENAME) - 1] = '\0';
-
-    /* Initialize the file */
-    printf("Creating samples file...\n");
-    if(!init_sample_file(OUTPUT_FILENAME)) {
-        printf("Read-only filesytem. Writing samples to stdout\n");
-    }
-
-    printf("Creating profiler thread...\n");
-    // Initialize the samples to zero
-    memset(ARCS, 0, sizeof(ARCS));
-
-    PROFILER_RUNNING = true;
-    THREAD = thd_create(0, run, NULL);
-
-    /* Lower priority is... er, higher */
-    thd_set_prio(THREAD, PRIO_DEFAULT / 2);
-
-    printf("Thread started.\n");
-}
-
-void profiler_start() {
-    assert(PROFILER_RUNNING);
-
-    if(PROFILER_RECORDING) {
+void __attribute__ ((no_instrument_function, constructor)) main_constructor(void) {
+    fp = fopen("/pc/trace.bin", "wb");
+    if(fp == NULL) {
+        fprintf(stderr, "trace.bin file not opened\n");
         return;
     }
 
-    PROFILER_RECORDING = true;
-    printf("Starting profiling...\n");
-}
+    fd = fileno(fp);
 
-static void clear_samples() {
-    /* Free the samples we've collected to start again */
-    Arc* root = ARCS;
-    for(int i = 0; i < BUCKET_SIZE; ++i) {
-        Arc* s = root;
-        Arc* next = s->next;
+    /* Cleanup at exit */
+    atexit(cleanup);
 
-        // While we have a next pointer
-        while(next) {
-            s = next; // Point S at it
-            next = s->next; // Store the new next pointer
-            free(s); // Free S
-        }
-
-        // We've wiped the chain so we can now clear the root
-        // which is statically allocated
-        root->next = NULL;
-        root++;
-    }
-
-    // Wipe the lot
-    memset(ARCS, 0, sizeof(ARCS));
-    ARC_COUNT = 0;
-}
-
-bool profiler_stop() {
-    if(!PROFILER_RECORDING) {
-        return false;
-    }
-
-    printf("Stopping profiling...\n");
-
-    PROFILER_RECORDING = false;
-    if(!write_samples(OUTPUT_FILENAME)) {
-        printf("ERROR WRITING SAMPLES (RO filesystem?)! Outputting to stdout\n");
-        return false;
-    }
-
-
-    return true;
-}
-
-void profiler_clean_up() {
-    profiler_stop(); // Make sure everything is stopped
-
-    PROFILER_RUNNING = false;
-    thd_join(THREAD, NULL);
+    /* Start performance counters */
+    perf_cntr_timer_disable();
+    perf_cntr_clear(PRFC0);
+    perf_cntr_clear(PRFC1);
+    perf_cntr_start(PRFC0, PMCR_OPERAND_CACHE_MISS_MODE, PMCR_COUNT_CPU_CYCLES);
+    perf_cntr_start(PRFC1, PMCR_INSTRUCTION_CACHE_MISS_MODE, PMCR_COUNT_CPU_CYCLES);
 }
