@@ -38,16 +38,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <lz4/lz4.h>
+// #include "kosinski_lz4.h"
 // #include "profiler.h"
 
 
 #define DCMV_MAGIC "DCMV"
-#define VIDEO_FILE "/cd/movie.dcmv"
+#define VIDEO_FILE "/pc/movie.dcmv"
 
 static FILE *fp = NULL, *audio_fp = NULL;
 static uint8_t *compressed_buffer = NULL;
 static uint32_t *frame_offsets = NULL;
-static int frame_index = 0;
+static int frame_index =18282 ;
 static int frame_type, video_width, video_height, fps, sample_rate, num_frames, video_frame_size, audio_channels, max_compressed_size, audio_offset;
 static int audio_bytes_fed = 0;
 snd_stream_hnd_t stream;
@@ -60,8 +61,78 @@ char screenshotfilename[256];
 static uint8_t *frame_buffer;
 static volatile int ready_buffer = -1;
 static volatile int audio_started = 0;
-int soundbufferalloc = 4096;
+int soundbufferalloc = 8192;
 static volatile float current_audio_frame = 0;
+
+// static LZ4_DC_Stream lz4_ctx; 
+
+double
+psTimer(void)
+{
+	// Clock off AICA
+	//
+	// according to purist, sh4 is 199.5MHz (KOS assumes 200 mhz)
+	// and the sh4 has a different clock domain from AICA
+	//
+	// This solves the sound drift issue in the part 2 of the intro
+	//
+	// N.B. This depends on the jiffies per second from AICA
+	//      and only works after AICA has been initialized
+	#define AICA_MEM_CLOCK      0x021000    /* 4 bytes */
+	uint32_t jiffies = g2_read_32(SPU_RAM_UNCACHED_BASE + AICA_MEM_CLOCK);
+	return jiffies / 4.410f;
+}
+
+// int load_frame(int frame_num) {
+//     uint32_t offset = frame_offsets[frame_num];
+//     uint32_t next_offset = frame_offsets[frame_num + 1];
+//     uint32_t compressed_size = next_offset - offset;
+// // printf("FRAME %d: comp_size=%u, decomp_size=%u\n",
+// //        frame_num, compressed_size, video_frame_size);
+//     // Validate sizes
+//     if (compressed_size > max_compressed_size || compressed_size < 4) {
+//         printf("Invalid compressed size: %lu\n", compressed_size);
+//         return -1;
+//     }
+
+//     fseek(fp, offset, SEEK_SET);
+//     size_t read = fread(compressed_buffer, 1, compressed_size, fp);
+//     if (read != compressed_size) {
+//         printf("Read failed: %zu/%lu\n", read, compressed_size);
+//         return -1;
+//     }
+// // printf("BUFFER RANGES: src=%p-%p, dst=%p-%p\n",
+// //        compressed_buffer, compressed_buffer + compressed_size,
+// //        frame_buffer, frame_buffer + video_frame_size);
+//     // 3. Decompress
+//     int result = LZ4_DC_decompressHC_safest_fast(
+//         &lz4_ctx,
+//         compressed_buffer,
+//         frame_buffer,
+//         compressed_size,
+//         video_frame_size
+//     );
+
+//     if (result != video_frame_size) {
+//         printf("Decompression failed @ frame %d\n", frame_num);
+//         return -1;
+//     }
+
+//     if (result != video_frame_size) {
+//         printf("Decompression failed: %d/%d\n", result, video_frame_size);
+        
+//         // Debug: Print first 8 bytes
+//         printf("Input header:");
+//         for (int i = 0; i < 8 && i < compressed_size; i++) {
+//             printf(" %02X", compressed_buffer[i]);
+//         }
+//         printf("\n");
+        
+//         return -1;
+//     }
+
+//     return 0;
+// }
 
 static int load_frame(int frame_num) {
     uint32_t offset = frame_offsets[frame_num];
@@ -70,7 +141,8 @@ static int load_frame(int frame_num) {
 
     fseek(fp, offset, SEEK_SET);
     fread(compressed_buffer, 1, compressed_size, fp);
-    
+    printf("Frame %d , compressed = %ld\n", frame_num,compressed_size );
+    // fread(frame_buffer, 1, compressed_size, fp);
     LZ4_decompress_fast(
         (const char *)compressed_buffer,
         (char *)frame_buffer,
@@ -120,7 +192,8 @@ static int load_header(void) {
 }
 
 static int init_pvr(int frame_type) {
-    pvr_init_defaults();
+    // LZ4_DC_init(&lz4_ctx);
+        pvr_init_defaults();
     if (frame_type == 1) {
         pvr_txr = pvr_mem_malloc(video_width * video_height * 2);
     } else {
@@ -173,24 +246,15 @@ void draw_frame() {
     pvr_list_begin(PVR_LIST_OP_POLY);
     pvr_dr_state_t dr;
     pvr_dr_init(&dr);
-    pvr_poly_hdr_t *hdr_ptr = (pvr_poly_hdr_t *)pvr_dr_target(dr);
-    memcpy(hdr_ptr, &hdr, sizeof(pvr_poly_hdr_t));
-    pvr_dr_commit(hdr_ptr);
-    pvr_vertex_t *v = (pvr_vertex_t *)pvr_dr_target(dr);
-    *v = vert[0];
-    pvr_dr_commit(v);
 
-    v = (pvr_vertex_t *)pvr_dr_target(dr);
-    *v = vert[1];
-    pvr_dr_commit(v);
+    // PVR TA store queue destination address
+    uintptr_t sq_dest_addr = (uintptr_t)SQ_MASK_DEST(PVR_TA_INPUT);
+    
+    // Submit polygon header
+    sq_fast_cpy((void *)sq_dest_addr, &hdr, 1);
+    // Submit 4 vertices
+    sq_fast_cpy((void *)sq_dest_addr, vert, 4);
 
-    v = (pvr_vertex_t *)pvr_dr_target(dr);
-    *v = vert[2];
-    pvr_dr_commit(v);
-
-    v = (pvr_vertex_t *)pvr_dr_target(dr);
-    *v = vert[3];
-    pvr_dr_commit(v);
     pvr_dr_finish();
     pvr_list_finish();
     pvr_scene_finish();
@@ -220,14 +284,15 @@ static void wait_exit(void) {
 
 void *audio_poll_thread(void *p) {
     while (1) {
+        // printf("snd_stream_poll\n");
         snd_stream_poll(stream);
-        thd_sleep(40);  
+        thd_sleep(20);  
         wait_exit();
 
     }
     return NULL;
 }
-
+float start_time;
 int main(int argc, char **argv) {
     // profiler_init("/pc/gmon.out");
     // profiler_start();
@@ -239,13 +304,22 @@ int main(int argc, char **argv) {
     fread(frame_offsets, sizeof(uint32_t), num_frames + 1, fp);
 
     // Allocate buffer for compressed frames
-    compressed_buffer = malloc(max_compressed_size);
+    compressed_buffer = memalign(32, max_compressed_size);
     if (!compressed_buffer) return -1;
-
+    
+    // int target_frame = (int)(current_time / frame_time) + frame_index;
     // Open the audio file and seek to the audio offset
     audio_fp = fopen(VIDEO_FILE, "rb"); // Point to the same file as video
-    fseek(audio_fp, audio_offset, SEEK_SET);  // Seek to the correct audio offset
+    // int samples_per_frame = sample_rate / fps;
+    // int total_samples_to_skip = frame_index * samples_per_frame;
 
+    // // ADPCM is 4 bits per sample, so bytes = samples / 2
+    // // Plus we need block alignment (16 bytes per ADPCM block)
+    // int bytes_to_skip = (total_samples_to_skip / 2) & ~0xF;  // Align to 16-byte blocks
+    // bytes_to_skip += audio_offset;
+
+    // // Seek to the calculated position
+    // fseek(audio_fp, bytes_to_skip, SEEK_SET);
     // Allocate frame buffer
     frame_buffer = memalign(32, video_frame_size);
     if (!frame_buffer) return -1;
@@ -254,29 +328,91 @@ int main(int argc, char **argv) {
     if (init_pvr(frame_type) < 0) return -1;
 
     // Initialize audio stream
-    snd_stream_init();
+    // Initialize audio stream
+    // snd_stream_init();
+    snd_stream_init_ex(audio_channels, soundbufferalloc);
     stream = snd_stream_alloc(NULL, soundbufferalloc);
     snd_stream_set_callback_direct(stream, audio_cb);
-    snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
-    // audio_bytes_fed = 0;
-
-    // Precompute bytes_per_frame as float
-    float bytes_per_sample = (float)audio_channels / 2.0f;
-    float inv_bytes_per_frame = (fps / (float)sample_rate) / bytes_per_sample; 
-
+    
+    // Calculate exact audio position for frame 140
+    float frames_per_second = (float)fps;
+    float samples_per_second = (float)sample_rate;
+    int samples_per_frame = (int)(samples_per_second / frames_per_second);
+    int total_samples_to_skip = frame_index * samples_per_frame;
+    
+    // ADPCM is 4 bits per sample, so bytes = samples / 2
+    // Plus we need block alignment (16 bytes per ADPCM block)
+    int bytes_to_skip = (total_samples_to_skip / 2);
+    bytes_to_skip = (bytes_to_skip + 15) & ~0xF;  // Round up to nearest 16-byte boundary
+    bytes_to_skip += audio_offset;
+    
+    printf("Seeking to audio position: 0x%X bytes (frame %d)\n", bytes_to_skip, frame_index);
+    
+    // Seek audio and reset stream
+    fseek(audio_fp, bytes_to_skip, SEEK_SET);
+    int initial_audio_skip = bytes_to_skip - audio_offset;
+// audio_bytes_fed = 0;
+        snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
     // Create audio polling thread
     audio_thread = thd_create(0, audio_poll_thread, NULL);
 
-    // Frame rendering loop
-    while (frame_index < num_frames) {
-        int should_be_frame = (int)((float)audio_bytes_fed * inv_bytes_per_frame);
-        int target_frame = should_be_frame < num_frames ? should_be_frame : num_frames;
-        while (frame_index < target_frame) {
-            if (load_frame(frame_index) != 0) break;
-            draw_frame();
-            ++frame_index;
-        }
+    int initial_frame_index=frame_index;
+    float audio_time_offset = (float)(initial_audio_skip * 2) / (float)sample_rate;
+    #define FRAME_DURATION (1.0f / frames_per_second)
+    #define VIDEO_START_FRAME 0
+    // // Load and display FIRST FRAME immediately
+    // if (load_frame(frame_index)) {
+    //     printf("Failed to load initial frame %d\n", frame_index);
+    //     return -1;
+    // }
+    // draw_frame();
+    // Set up timing - account for the fact we're starting at frame 140
+    start_time = psTimer() - ((float)(frame_index) * FRAME_DURATION);
+    float video_time_offset = (float)frame_index * FRAME_DURATION;
+    frame_index++; // Next frame to process
+
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
+// Main rendering loop
+#define FRAME_DURATION (1.0f / frames_per_second)
+
+while (frame_index < num_frames) {
+    float now = psTimer() - start_time;
+
+    float audio_time = audio_time_offset + ((float)audio_bytes_fed * 2 / (float)(sample_rate * audio_channels));
+
+
+    float effective_time = MIN(now, audio_time);
+    float expected_time = (float)(frame_index - VIDEO_START_FRAME) * FRAME_DURATION;
+    float drift = effective_time - expected_time;
+
+    if (frame_index %100 == 0) {
+        printf("Frame %d (logical frame %d) | ⏱ now=%.3f 🎧 audio=%.3f 🎞 drift=%.3f\n",
+       frame_index, frame_index - VIDEO_START_FRAME, now, audio_time, drift);
     }
+
+if (effective_time >= expected_time) {
+    if (load_frame(frame_index)) break;
+    draw_frame();
+    frame_index++;
+
+    float drift = effective_time - expected_time;
+    int sleep_ms = (int)((FRAME_DURATION - drift) * 1000);
+    if (sleep_ms > 0 && sleep_ms < 100) {
+        thd_sleep(sleep_ms);  // smooth adjustment
+        // printf("video sleep\n");
+    } else {
+        thd_pass();  // avoid busy wait
+        // printf("video pass\n");
+    }
+} else {
+    int sleep_ms = (int)((expected_time - effective_time) * 1000);
+    if (sleep_ms > 0) thd_sleep(sleep_ms);
+    else thd_sleep(1);
+}
+
+        wait_exit();
+    }
+
     // profiler_stop();
     // profiler_clean_up();
     // Clean up

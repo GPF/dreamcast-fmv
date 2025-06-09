@@ -9,7 +9,7 @@
  *   - Frame offset table for decompression and sync
  *   - Extended header (version 3) with metadata + audio offset
  *
- * Header format (42 bytes total):
+ * Header format (35 bytes total):
  *   4 bytes  - Magic "DCMV"
  *   4 bytes  - Version (3)
  *   2 bytes  - Video width
@@ -21,7 +21,12 @@
  *   4 bytes  - Uncompressed frame size
  *   4 bytes  - Maximum compressed frame size (LZ4)
  *   4 bytes  - Audio stream offset (absolute file position)
- *
+ *   Offset Table:
+ *   - Immediately follows the 35-byte header
+ *   - Contains (num_frames + 1) uint32_t values
+ *   - Each entry is a byte offset to the start of a frame
+ *   - The final offset points to the start of the audio stream
+ * 
  * The tool assumes input video frames follow a numeric pattern like:
  *   "output/frame%04d.dt"
  * All frames must be of the same size and format (e.g., RGB565 VQ).
@@ -51,7 +56,7 @@
 #include <errno.h>
 #include <lz4.h>
 #include <lz4hc.h>
-#include <lz4hc.h>
+
 
 #define MAX_FRAMES 99999
 #define FRAME_FILENAME_MAX 256
@@ -130,17 +135,22 @@ int main(int argc, char **argv) {
     FILE *out = fopen(output_path, "wb+");
     if (!out) { perror("Output open failed"); return 1; }
 
-    fseek(out, 43, SEEK_SET);   // size of DCMV header
-    long offset_table_pos = ftell(out);  // where offset table starts
-    fseek(out, (frame_count + 1) * sizeof(uint32_t), SEEK_CUR);
-
     uint32_t *offsets = malloc((frame_count + 1) * sizeof(uint32_t));
     if (!offsets) {
         fprintf(stderr, "OOM\n");
         return 1;
-    }
+    }    
+    fseek(out, 35, SEEK_SET);   // size of DCMV header
+    long offset_table_pos = ftell(out);  // where offset table starts
+
+    fseek(out, (frame_count + 1) * sizeof(uint32_t), SEEK_CUR);
+    offsets[0] = ftell(out);
+
 
     uint32_t max_compressed_size = 0;
+
+// Initialize offset[0] before writing frames
+    // offsets[0] = ftell(out);
 
     for (int i = 0; i < frame_count; ++i) {
         snprintf(filename, sizeof(filename), frame_pattern, i);
@@ -194,20 +204,26 @@ int main(int argc, char **argv) {
             return 1;
         }
 
-        int comp_size = LZ4_compress_HC((const char *)src, (char *)comp, src_len, bound, 12);
+        int comp_size = LZ4_compress_fast((const char *)src, (char *)comp, src_len, bound, 12);
         if (comp_size <= 0) {
             fprintf(stderr, "LZ4 compression failed on frame %d\n", i);
             return 1;
         }
-        // printf("comp size=%d, max_compress_size so far=%d\n",comp_size, max_compressed_size);
-        offsets[i] = ftell(out);
-        if (comp_size > max_compressed_size)
-            max_compressed_size = comp_size;
 
         fwrite(comp, 1, comp_size, out);
         free(comp);
-            // printf("filename%d = %s\n",i, filename);
+
+        // fwrite(src, 1, src_len, out);
+        // Set the offset for the *next* frame after writing this one
+        offsets[i + 1] = ftell(out);
+
+        
+        // if (src_len > max_compressed_size)
+        //     max_compressed_size = src_len;
+        if (comp_size > max_compressed_size)
+            max_compressed_size = comp_size;
     }
+
 
     free(raw_buf);
          
