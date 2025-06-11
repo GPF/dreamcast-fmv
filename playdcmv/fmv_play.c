@@ -404,7 +404,7 @@ int main(int argc, char **argv) {
 
     dctx = ZSTD_createDCtx();
     ZSTD_DCtx_setParameter(dctx, ZSTD_d_format, ZSTD_f_zstd1_magicless);
-    ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 16);
+    ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 15);
     ZSTD_DCtx_setParameter(dctx, ZSTD_d_forceIgnoreChecksum, 1);
     ZSTD_DCtx_setParameter(dctx, ZSTD_d_refMultipleDDicts, ZSTD_rmd_refSingleDDict);
     ZSTD_DCtx_setParameter(dctx, ZSTD_d_maxBlockSize, 65536);
