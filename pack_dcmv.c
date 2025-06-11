@@ -9,12 +9,12 @@
  *   - Frame offset table for decompression and sync
  *   - Extended header (version 3) with metadata + audio offset
  *
- * Header format (35 bytes total):
+ * Header format (37 bytes total):
  *   4 bytes  - Magic "DCMV"
  *   4 bytes  - Version (3)
  *   2 bytes  - Video width
  *   2 bytes  - Video height
- *   2 bytes  - Frame rate (fps)
+ *   4 bytes  - Frame rate (fps)
  *   2 bytes  - Audio sample rate
  *   2 bytes  - Audio channel count
  *   4 bytes  - Number of video frames
@@ -22,7 +22,7 @@
  *   4 bytes  - Maximum compressed frame size (LZ4)
  *   4 bytes  - Audio stream offset (absolute file position)
  *   Offset Table:
- *   - Immediately follows the 35-byte header
+ *   - Immediately follows the 37-byte header
  *   - Contains (num_frames + 1) uint32_t values
  *   - Each entry is a byte offset to the start of a frame
  *   - The final offset points to the start of the audio stream
@@ -38,7 +38,7 @@
  *   pack_dcmv_lz4_fixed <output.dcmv> <width> <height> <fps> <sample_rate> <channels> <frame_pattern> <audio_file>
  *
  * Example:
- *   ./pack_dcmv_lz4_fixed movie.dcmv 512 512 24 32000 1 output/frame%04d.dt audio.dca
+ *   ./pack_dcmv_lz4_fixed movie.dcmv 512 512 23.97 32000 1 output/frame%04d.dt audio.dca
  *
  * Dependencies:
  *   - LZ4 (lz4.h, lz4hc.h)
@@ -56,12 +56,13 @@
 #include <errno.h>
 #include <lz4.h>
 #include <lz4hc.h>
-
+#define ZSTD_STATIC_LINKING_ONLY
+#include <zstd.h>
 
 #define MAX_FRAMES 99999
 #define FRAME_FILENAME_MAX 256
 
-void write_header(FILE *out, uint8_t frame_type, uint16_t width, uint16_t height, uint16_t fps, uint16_t sample_rate,
+void write_header(FILE *out, uint8_t frame_type, uint16_t width, uint16_t height, float fps, uint16_t sample_rate,
                   uint16_t channels, uint32_t num_frames, uint32_t frame_size, uint32_t max_compressed_size, uint32_t audio_offset) {
     fwrite("DCMV", 1, 4, out);
     uint32_t version = 3;
@@ -69,7 +70,7 @@ void write_header(FILE *out, uint8_t frame_type, uint16_t width, uint16_t height
     fwrite(&frame_type, 1, 1, out);
     fwrite(&width, 2, 1, out);
     fwrite(&height, 2, 1, out);
-    fwrite(&fps, 2, 1, out);
+    fwrite(&fps, sizeof(float), 1, out);
     fwrite(&sample_rate, 2, 1, out);
     fwrite(&channels, 2, 1, out);
     fwrite(&num_frames, 4, 1, out);
@@ -80,7 +81,7 @@ void write_header(FILE *out, uint8_t frame_type, uint16_t width, uint16_t height
 
 int main(int argc, char **argv) {
     if (argc != 10) {
-        printf("Usage: %s <output.dcmv> <frame_type 0=RGB565, 1=YUV420P> <width> <height> <fps> <sample_rate> <channels> <frame_pattern> <audio_file>\n", argv[0]);
+        printf("Usage: %s <output.dcmv> <frame_type 0=RGB565, 1=YUV420P> <width> <height> <fps=23.97> <sample_rate> <channels> <frame_pattern> <audio_file>\n", argv[0]);
         return 1;
     }
 
@@ -88,7 +89,7 @@ int main(int argc, char **argv) {
     uint16_t frame_type = atoi(argv[2]);
     uint16_t width = atoi(argv[3]);
     uint16_t height = atoi(argv[4]);
-    uint16_t fps = atoi(argv[5]);
+    float fps = strtof(argv[5], NULL); 
     uint16_t sample_rate = atoi(argv[6]);
     uint16_t channels = atoi(argv[7]);
     const char *frame_pattern = argv[8];
@@ -140,7 +141,7 @@ int main(int argc, char **argv) {
         fprintf(stderr, "OOM\n");
         return 1;
     }    
-    fseek(out, 35, SEEK_SET);   // size of DCMV header
+    fseek(out, 37, SEEK_SET);   // size of DCMV header
     long offset_table_pos = ftell(out);  // where offset table starts
 
     fseek(out, (frame_count + 1) * sizeof(uint32_t), SEEK_CUR);
@@ -149,8 +150,13 @@ int main(int argc, char **argv) {
 
     uint32_t max_compressed_size = 0;
 
-// Initialize offset[0] before writing frames
-    // offsets[0] = ftell(out);
+ZSTD_CCtx* cctx = ZSTD_createCCtx();
+ZSTD_CCtx_setParameter(cctx, ZSTD_c_format, ZSTD_f_zstd1_magicless);
+ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 22);
+// Add these parameters for Dreamcast-friendly compression:
+ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 15);  // Reduce from default 27
+ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, 0);
+ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 0);  // Skip checksums
 
     for (int i = 0; i < frame_count; ++i) {
         snprintf(filename, sizeof(filename), frame_pattern, i);
@@ -197,20 +203,32 @@ int main(int argc, char **argv) {
         size_t src_len = original_size - skip;
         uint8_t *src = raw_buf + skip;
 
-        int bound = LZ4_compressBound(src_len);
-        uint8_t *comp = malloc(bound);
-        if (!comp) {
-            perror("Failed to malloc comp");
+        size_t bound = ZSTD_compressBound(src_len);
+        uint8_t *comp = malloc(bound);        
+        ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);
+        ZSTD_inBuffer input = { src, src_len, 0 };
+        ZSTD_outBuffer output = { comp, bound, 0 };
+
+        size_t res = ZSTD_compressStream2(cctx, &output, &input, ZSTD_e_end);
+        if (ZSTD_isError(res)) {
+            fprintf(stderr, "ZSTD compress error on frame %d: %s\n", i, ZSTD_getErrorName(res));
             return 1;
         }
+                
+        // int bound = LZ4_compressBound(src_len);
+        // uint8_t *comp = malloc(bound);
+        // if (!comp) {
+        //     perror("Failed to malloc comp");
+        //     return 1;
+        // }
 
-        int comp_size = LZ4_compress_fast((const char *)src, (char *)comp, src_len, bound, 12);
-        if (comp_size <= 0) {
-            fprintf(stderr, "LZ4 compression failed on frame %d\n", i);
-            return 1;
-        }
+        // int comp_size = LZ4_compress_fast((const char *)src, (char *)comp, src_len, bound, 12);
+        // if (comp_size <= 0) {
+        //     fprintf(stderr, "LZ4 compression failed on frame %d\n", i);
+        //     return 1;
+        // }
 
-        fwrite(comp, 1, comp_size, out);
+        fwrite(comp, 1, output.pos, out);
         free(comp);
 
         // fwrite(src, 1, src_len, out);
@@ -220,13 +238,13 @@ int main(int argc, char **argv) {
         
         // if (src_len > max_compressed_size)
         //     max_compressed_size = src_len;
-        if (comp_size > max_compressed_size)
-            max_compressed_size = comp_size;
+        if (output.pos > max_compressed_size)
+            max_compressed_size = output.pos;
     }
 
 
     free(raw_buf);
-         
+    ZSTD_freeCCtx(cctx);     
     // Patch max_compressed_size back into header
     // fseek(out, 0x1A, SEEK_SET);
     

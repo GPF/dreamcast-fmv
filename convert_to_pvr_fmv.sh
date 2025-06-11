@@ -29,9 +29,13 @@
 INPUT="/home/gpf/code/dreamcast/DirkSimple/lair.ogv"
 OUTPUT_DIR="output"
 TEMP_DIR="temp_frames"
-FPS=24
-WIDTH=256
+FPS=23.97
+WIDTH=512
 HEIGHT=256
+SCALE_WIDTH=320
+SCALE_HEIGHT=240
+PAD_X=$(( (WIDTH - SCALE_WIDTH) / 2 ))  # (512 - 320) / 2 = 96
+PAD_Y=$(( (HEIGHT - SCALE_HEIGHT) / 2 )) # (256 - 240) / 2 = 8
 AUDIO_RATE=32000
 CHANNELS=1
 FORMAT="rgb565"  # yuv420p or rgb565
@@ -61,7 +65,7 @@ FFMPEG_OPTS=(
     -loglevel "$FFMPEG_LOGLEVEL"
     -y
     -i "$INPUT"
-    -vf "scale=$WIDTH:$HEIGHT:flags=lanczos,hqdn3d=1.0:1.0:6.0:6.0,smartblur=1.0:0.0"
+    -vf "scale=$SCALE_WIDTH:$SCALE_HEIGHT:flags=lanczos,pad=$WIDTH:$HEIGHT:$PAD_X:$PAD_Y:black,hqdn3d=1.0:1.0:6.0:6.0,smartblur=1.0:0.0"
     -sws_flags "+accurate_rnd+full_chroma_int+full_chroma_inp"
 )
 
