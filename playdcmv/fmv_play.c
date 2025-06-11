@@ -76,14 +76,17 @@ char screenshotfilename[256];
 #define NUM_BUFFERS 2
 static uint8_t *frame_buffer[NUM_BUFFERS];
 static volatile int ready[NUM_BUFFERS] = {0, 0};
+#define INVALID_FRAME -1
+static atomic_int preload_frame = INVALID_FRAME;
+static int preload_buf = 0;
+
 static volatile int audio_started = 0;
 int soundbufferalloc = 8192;
 static volatile float current_audio_frame = 0;
 
 // static LZ4_DC_Stream lz4_ctx; 
 
-double
-psTimer(void)
+static inline double psTimer(void)
 {
 	// Clock off AICA
 	//
@@ -370,12 +373,22 @@ static void wait_exit(void) {
 
 void *worker_thread(void *p) {
     while (1) {
-        // Correct atomic read
+        // Trigger audio refill if not muted
         if (atomic_load(&audio_muted) == 0) {
             snd_stream_poll(stream);
         }
-        thd_sleep(20);
+
+        // Async preload if requested
+        int frame_to_load = atomic_exchange(&preload_frame, INVALID_FRAME);
+        if (frame_to_load != INVALID_FRAME) {
+            int buf = preload_buf;
+            if (!ready[buf]) {
+                load_frame(frame_to_load, buf);
+            }
+        }
+
         wait_exit();
+        thd_sleep(1);  // 1–2ms granularity is fine here
     }
     return NULL;
 }
@@ -490,17 +503,17 @@ double frame_time_samples = 0.0;
 while (atomic_load(&frame_index) < num_frames) {
     int current_frame = atomic_load(&frame_index);
     int requested_seek = atomic_exchange(&seek_request, -1);
-    
+    double loop_timer_ms = psTimer();
     if (requested_seek != -1) {
         seek_to_frame(requested_seek);
         current_frame = atomic_load(&frame_index);
         accumulated_frame_debt = 0.0;
-        frame_start_time = psTimer();
+        frame_start_time = loop_timer_ms;
         continue; // FIX #2a: Continue immediately after seek to start fresh
     }
 
     double current_audio_start_ms = atomic_load(&audio_start_time_ms);
-    double current_audio_time_ms = current_audio_start_ms + (psTimer() - frame_start_time);
+    double current_audio_time_ms = current_audio_start_ms + (loop_timer_ms - frame_start_time);
     double expected_video_time = current_frame * frame_time_ms;
 
     // Calculate target time with debt compensation
@@ -532,7 +545,7 @@ while (atomic_load(&frame_index) < num_frames) {
     
     // FIX #3: Always ensure we have a frame loaded before trying to display
     if (current_audio_time_ms >= target_time_ms) {
-        double frame_render_start = psTimer();
+        double frame_render_start = loop_timer_ms;
         
         int buf_index = current_frame % NUM_BUFFERS;
 
@@ -553,15 +566,15 @@ while (atomic_load(&frame_index) < num_frames) {
         if (next_frame < num_frames) {
             int next_buf_index = next_frame % NUM_BUFFERS;
             if (!ready[next_buf_index]) {
-                // Load next frame in background (non-blocking)
-                load_frame(next_frame, next_buf_index);
+                atomic_store(&preload_buf, next_buf_index);
+                atomic_store(&preload_frame, next_frame);
             }
         }
         
         atomic_fetch_add(&frame_index, 1);
         
         // Frame timing calculations (same as before)
-        double frame_render_end = psTimer();
+        double frame_render_end = loop_timer_ms;
         double this_frame_time = frame_render_end - frame_render_start;
         
         if (this_frame_time > max_frame_time) {
@@ -583,7 +596,7 @@ while (atomic_load(&frame_index) < num_frames) {
             printf("WARNING: Frame %d took %.1fms (%.1f%% of budget), debt now: %.1fms\n", 
                    current_frame, this_frame_time, (this_frame_time / frame_time_ms) * 100.0, accumulated_frame_debt);
         }
-        
+
     } else {
         // Waiting logic (same as before)
         double wait_ms = target_time_ms - current_audio_time_ms;
