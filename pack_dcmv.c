@@ -150,13 +150,13 @@ int main(int argc, char **argv) {
 
     uint32_t max_compressed_size = 0;
 
-ZSTD_CCtx* cctx = ZSTD_createCCtx();
-ZSTD_CCtx_setParameter(cctx, ZSTD_c_format, ZSTD_f_zstd1_magicless);
-ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 22);
-// Add these parameters for Dreamcast-friendly compression:
-ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 15);  // Reduce from default 27
-ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, 0);
-ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 0);  // Skip checksums
+    ZSTD_CCtx* cctx = ZSTD_createCCtx();
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_format, ZSTD_f_zstd1_magicless);
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 22);
+    // Add these parameters for Dreamcast-friendly compression:
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 15);  // Reduce from default 27
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, 0);
+    ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 0);  // Skip checksums
 
     for (int i = 0; i < frame_count; ++i) {
         snprintf(filename, sizeof(filename), frame_pattern, i);
@@ -222,13 +222,16 @@ ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 0);  // Skip checksums
         //     return 1;
         // }
 
-        // int comp_size = LZ4_compress_fast((const char *)src, (char *)comp, src_len, bound, 12);
+        // int comp_size = LZ4_compress_HC((const char *)src, (char *)comp, src_len, bound, 12);
         // if (comp_size <= 0) {
         //     fprintf(stderr, "LZ4 compression failed on frame %d\n", i);
         //     return 1;
         // }
+        printf("\rFrame %d/%d", i + 1, frame_count);
+        
+        fwrite(comp, 1, output.pos, out); //zstd
 
-        fwrite(comp, 1, output.pos, out);
+        // fwrite(comp, 1, comp_size, out); //lz4
         free(comp);
 
         // fwrite(src, 1, src_len, out);
@@ -236,9 +239,9 @@ ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 0);  // Skip checksums
         offsets[i + 1] = ftell(out);
 
         
-        // if (src_len > max_compressed_size)
-        //     max_compressed_size = src_len;
-        if (output.pos > max_compressed_size)
+        // if (comp_size > max_compressed_size) //lz4
+        //     max_compressed_size = comp_size;
+        if (output.pos > max_compressed_size) //zstd
             max_compressed_size = output.pos;
     }
 

@@ -26,14 +26,14 @@
 
 # Settings
 # Configuration - User Adjustable
-INPUT="/home/gpf/code/dreamcast/DirkSimple/lair.ogv"
+INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4"
 OUTPUT_DIR="output"
 TEMP_DIR="temp_frames"
 FPS=23.97
 WIDTH=512
-HEIGHT=256
-SCALE_WIDTH=320
-SCALE_HEIGHT=240
+HEIGHT=512
+SCALE_WIDTH=512
+SCALE_HEIGHT=288
 PAD_X=$(( (WIDTH - SCALE_WIDTH) / 2 ))  # (512 - 320) / 2 = 96
 PAD_Y=$(( (HEIGHT - SCALE_HEIGHT) / 2 )) # (256 - 240) / 2 = 8
 AUDIO_RATE=32000
@@ -80,6 +80,7 @@ echo "📂 Created directories: $OUTPUT_DIR, $TEMP_DIR"
 
 process_rgb565() {
     EXT="dt"
+    FRAME_TYPE=0
     echo "📁 Checking for existing $EXT frames..."
     
     if compgen -G "$OUTPUT_DIR/frame*.${EXT}" >/dev/null; then
@@ -112,6 +113,7 @@ process_rgb565() {
 
 process_yuv420p() {
     EXT="bin"
+    FRAME_TYPE=0
     local FRAME_SIZE=$((WIDTH * HEIGHT * 3 / 2))
     
     echo "🎥 Extracting raw YUV420p frames..."
@@ -149,15 +151,20 @@ TOTAL_FRAMES=$frame_idx
 echo "✅ Converted $TOTAL_FRAMES frames."
 
 # Extract and convert audio
-echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
-ffmpeg -hide_banner -loglevel error -i "$INPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
-"$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
-  -i "$TEMP_DIR/temp.wav" -o "$TEMP_DIR/audio.dca" || exit 1
+AUDIO_OUT="$OUTPUT_DIR/audio.dca"
+if [[ -f "$AUDIO_OUT" ]]; then
+    echo "✅ Found existing audio.dca, skipping audio extraction."
+else
+    echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
+    ffmpeg -hide_banner -loglevel error -i "$INPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
+    "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
+      -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
+fi
 
 # Pack video frames + audio into compressed .dcmv format
 echo "📦 Packing into compressed .dcmv format..."
 "$PACKER" "./playdcmv/movie.dcmv" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
-  "$OUTPUT_DIR/frame%05d.${EXT}" "$TEMP_DIR/audio.dca" || exit 1
+  "$OUTPUT_DIR/frame%05d.${EXT}" "$AUDIO_OUT" || exit 1
 
 # Clean up intermediate files
 # echo "🧹 Cleaning up temporary files..."
