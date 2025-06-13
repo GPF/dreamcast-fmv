@@ -26,14 +26,14 @@
 
 # Settings
 # Configuration - User Adjustable
-INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4"
+INPUT="/home/gpf/code/dreamcast/DirkSimple/lair.ogv"
 OUTPUT_DIR="output"
 TEMP_DIR="temp_frames"
 FPS=23.97
 WIDTH=512
-HEIGHT=512
-SCALE_WIDTH=512
-SCALE_HEIGHT=288
+HEIGHT=256
+SCALE_WIDTH=320
+SCALE_HEIGHT=240
 PAD_X=$(( (WIDTH - SCALE_WIDTH) / 2 ))  # (512 - 320) / 2 = 96
 PAD_Y=$(( (HEIGHT - SCALE_HEIGHT) / 2 )) # (256 - 240) / 2 = 8
 AUDIO_RATE=32000
