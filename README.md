@@ -3,7 +3,7 @@
 This is a proof-of-concept FMV (Full Motion Video) playback toolchain for the Sega Dreamcast.
 It includes:
 
-* `pack_dcmv`: a frame+audio packer using LZ4 (LZ4_compress_HC) compression
+* `pack_dcmv`: a frame+audio packer using zstd level 22 compression
 * `fmv_play.elf`: a Dreamcast player that decompresses and displays the video while streaming synced ADPCM audio
 * conversion tools using ffmpeg + `pvrtex` + `dcaconv`
 
@@ -19,7 +19,7 @@ It includes:
 ├── convert_to_pvr_fmv.sh       # Main conversion script (edit manually to configure input)
 ├── dcaconv                     # ADPCM encoder (built from TapamN's dcaconv repo)
 ├── pack_dcmv.c                 # Source for video+audio packer
-├── pack_dcmv                   # Compiled binary (use: `gcc -O2 pack_dcmv.c -o pack_dcmv -llz4`)
+├── pack_dcmv                   # Compiled binary (use: `gcc -O2 pack_dcmv.c -o pack_dcmv -lzstd`)
 ├── yuv420converter             # Compiled binary (use: `gcc -O2 -o yuv420converter yuv420converter.c`)
 ├── input/
 │   └── Your source .mp4 files (manually configured in convert_to_pvr_fmv.sh)
@@ -35,7 +35,7 @@ It includes:
 * **ffmpeg**: used to extract YUV frames and audio from MP4
 * **pvrtex**: builds VQ-compressed RGB565 Dreamcast textures (from KOS utils folder)
 * **dcaconv**: encodes WAV audio to Dreamcast ADPCM format ([https://github.com/TapamN/dcaconv](https://github.com/TapamN/dcaconv))
-* **lz4**: used for LZ4_compress_HC compression([https://github.com/gyrovorbis/lz4](https://github.com/gyrovorbis/lz4))
+* **zstd**: used for zstd compression([https://github.com/GPF/zstd](https://github.com/GPF/zstd))
 
 ## Usage
 
