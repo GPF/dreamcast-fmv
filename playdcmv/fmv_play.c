@@ -70,7 +70,12 @@
     pvr_vertex_t vert[4];
     char screenshotfilename[256];
 
-    #define NUM_BUFFERS 8
+
+    #define VIDEO_START_FRAME 0
+    #define MIN(a,b) ((a) < (b) ? (a) : (b))
+    #define MAX(a,b) ((a) > (b) ? (a) : (b))
+
+    #define NUM_BUFFERS 16
     static uint8_t *frame_buffer[NUM_BUFFERS];
     // static volatile int ready[NUM_BUFFERS] = {0, 0, 0};
     #define INVALID_FRAME -1
@@ -81,7 +86,7 @@
         BUF_LOADING = 1,
         BUF_READY = 2
     };
-    #define RING_CAPACITY NUM_BUFFERS
+    #define RING_CAPACITY NUM_BUFFERS + 1
     static atomic_int preload_ring_head = 0;
     static atomic_int preload_ring_tail = 0;
     static atomic_int preload_ring[RING_CAPACITY];
@@ -239,15 +244,15 @@
             pvr_poly_compile(&hdr, &cxt);
         }
 
-        // vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=0, .z=1, .u=0, .v=0, .argb=0xffffffff};
-        // vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=640, .y=0, .z=1, .u=1, .v=0, .argb=0xffffffff};
-        // vert[2] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=480, .z=1, .u=0, .v=1, .argb=0xffffffff};
-        // vert[3] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX_EOL, .x=640, .y=480, .z=1, .u=1, .v=1, .argb=0xffffffff};
+        vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=0, .z=1, .u=0, .v=0, .argb=0xffffffff};
+        vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=640, .y=0, .z=1, .u=1, .v=0, .argb=0xffffffff};
+        vert[2] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=480, .z=1, .u=0, .v=1, .argb=0xffffffff};
+        vert[3] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX_EOL, .x=640, .y=480, .z=1, .u=1, .v=1, .argb=0xffffffff};
 
-        vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=80, .y=0, .z=1, .u=0.1875f, .v=0.03125f, .argb=0xffffffff};     // Top-left
-        vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=560, .y=0, .z=1, .u=0.8125f, .v=0.03125f, .argb=0xffffffff};    // Top-right
-        vert[2] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=80, .y=480, .z=1, .u=0.1875f, .v=0.96875f, .argb=0xffffffff};   // Bottom-left
-        vert[3] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX_EOL, .x=560, .y=480, .z=1, .u=0.8125f, .v=0.96875f, .argb=0xffffffff}; // Bottom-right    
+        // vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=80, .y=0, .z=1, .u=0.1875f, .v=0.03125f, .argb=0xffffffff};     // Top-left
+        // vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=560, .y=0, .z=1, .u=0.8125f, .v=0.03125f, .argb=0xffffffff};    // Top-right
+        // vert[2] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=80, .y=480, .z=1, .u=0.1875f, .v=0.96875f, .argb=0xffffffff};   // Bottom-left
+        // vert[3] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX_EOL, .x=560, .y=480, .z=1, .u=0.8125f, .v=0.96875f, .argb=0xffffffff}; // Bottom-right    
 
         
 
@@ -265,7 +270,7 @@
         } else {
             // printf("🎬 Drawing frame %d from buffer %d\n", frame_id, buf_index);
 
-            dcache_flush_range((uintptr_t)frame_buffer[buf_index],(uintptr_t)(frame_buffer[buf_index] + video_frame_size));
+            // dcache_flush_range((uintptr_t)frame_buffer[buf_index],(uintptr_t)(frame_buffer[buf_index] + video_frame_size));
             pvr_txr_load(frame_buffer[buf_index], pvr_txr, video_frame_size);
 
         }
@@ -289,29 +294,39 @@
     }
 
 bool schedule_frame_preload(int frame) {
+  int buf = frame % NUM_BUFFERS;
+    
+    // Check if buffer is already in use
+    int current_state = atomic_load(&buf_state[buf]);
+    if (current_state != BUF_EMPTY) {
+        // Don't schedule if buffer is already occupied
+        return false;
+    }
+    
     int head = atomic_load(&preload_ring_head);
     int tail = atomic_load(&preload_ring_tail);
     int next_head = (head + 1) % RING_CAPACITY;
 
-    // printf("🔧 Scheduling frame %d: head=%d, tail=%d, next_head=%d\n", 
-    //        frame, head, tail, next_head);
-
     if (next_head == tail) {
-        printf("⚠️ Preload ring full, dropping frame %d\n", frame);
-        return false;
+        return false; // Ring full
     }
 
-    // Optional: prevent duplicate preload entries
+    // Check for duplicates in ring
     for (int i = tail; i != head; i = (i + 1) % RING_CAPACITY) {
         if (preload_ring[i] == frame) {
-            printf("🔧 Frame %d already in ring, skipping\n", frame);
+            return false; // Already scheduled
+        }
+        
+        // Also check for buffer conflicts in ring
+        if ((preload_ring[i] % NUM_BUFFERS) == buf) {
+            printf("🔧 Buffer conflict: frame %d conflicts with queued frame %d (both use buf %d)\n", 
+                   frame, preload_ring[i], buf);
             return false;
         }
     }
 
     preload_ring[head] = frame;
     atomic_store(&preload_ring_head, next_head);
-    // printf("🔧 Frame %d added to ring at position %d\n", frame, head);
     return true;
 }
 void seek_to_frame(int new_frame) {
@@ -333,7 +348,7 @@ void seek_to_frame(int new_frame) {
         printf("🔄 Cleared buffer %d\n", i);
     }
 
-    // ✅ FIX: Clear ring buffer properly
+    // Clear ring buffer properly
     atomic_store(&preload_ring_head, 0);
     atomic_store(&preload_ring_tail, 0);
     printf("🔄 Ring buffer cleared\n");
@@ -347,24 +362,54 @@ void seek_to_frame(int new_frame) {
     audio_fp = fopen(VIDEO_FILE, "rb");
     fseek(audio_fp, bytes_to_skip, SEEK_SET);
 
-    // Update timing variables
-    double new_audio_time = (double)(new_frame * samples_per_frame) * 1000.0 / sample_rate;
-    atomic_store(&audio_start_time_ms, new_audio_time);
+    // Update frame index FIRST
     atomic_store(&frame_index, new_frame);
-    current_audio_frame = new_frame;
     
-    // ✅ FIX: Properly reschedule initial frames
+    // Schedule initial frames
     printf("🔄 Rescheduling initial frames starting from %d\n", new_frame);
-    for (int i = 0; i < NUM_BUFFERS && (new_frame + i) < num_frames; i++) {
+    for (int i = 0; i < MIN(NUM_BUFFERS, 4) && (new_frame + i) < num_frames; i++) {
         bool scheduled = schedule_frame_preload(new_frame + i);
         printf("🔄 Frame %d scheduled: %s\n", new_frame + i, scheduled ? "YES" : "NO");
     }
 
+    // **CRITICAL FIX**: Wait for first few frames to actually load
+    printf("🔄 Waiting for initial frames to load...\n");
+    for (int i = 0; i < MIN(3, NUM_BUFFERS) && (new_frame + i) < num_frames; i++) {
+        int frame_to_wait = new_frame + i;
+        int buf_to_wait = frame_to_wait % NUM_BUFFERS;
+        int wait_count = 0;
+        
+        while (atomic_load(&buf_state[buf_to_wait]) != BUF_READY && wait_count < 200) {
+            thd_sleep(1);
+            wait_count++;
+        }
+        
+        if (atomic_load(&buf_state[buf_to_wait]) == BUF_READY) {
+            printf("🔄 Frame %d ready in buffer %d\n", frame_to_wait, buf_to_wait);
+        } else {
+            printf("🔄 ⚠️ Frame %d not ready after waiting\n", frame_to_wait);
+        }
+    }
+
+    // **CRITICAL FIX**: Reset timing AFTER buffers are ready
+    double current_time = psTimer();
+    frame_start_time = current_time;
+    
+    // Calculate new audio timing
+    double new_audio_time = (double)(new_frame * samples_per_frame) * 1000.0 / sample_rate;
+    atomic_store(&audio_start_time_ms, new_audio_time);
+    current_audio_frame = new_frame;
+    
     printf("🔄 Seek complete: frame %d → %d | audio %.2fms → %.2fms | byte offset: %d\n",
         old_frame, new_frame, old_audio_time, new_audio_time,
         bytes_to_skip - audio_offset);
-
-    // Restart audio
+    
+    // **CRITICAL FIX**: Reset accumulated debt and stall count
+    // (These should be global variables in your main function)
+    // accumulated_frame_debt = 0.0;
+    // stall_count = 0;
+    
+    // Restart audio LAST
     atomic_store(&audio_muted, 0);
 }
 
@@ -400,7 +445,6 @@ void *worker_thread(void *p) {
     while (1) {
         snd_stream_poll(stream);
 
-        // ✅ FIX: Correct head/tail assignment
         int tail = atomic_load(&preload_ring_tail);
         int head = atomic_load(&preload_ring_head);
 
@@ -408,23 +452,39 @@ void *worker_thread(void *p) {
             int frame = preload_ring[tail];
             int buf = frame % NUM_BUFFERS;
 
-            // printf("🔧 Worker: Processing frame %d (buf %d) from ring\n", frame, buf);
+            // Check if this frame is still relevant (not too far behind current playback)
+            int current_frame = atomic_load(&frame_index);
+            if (frame < current_frame - NUM_BUFFERS) {
+                // Frame is too old, skip it
+                printf("🗑️ Skipping stale frame %d (current: %d)\n", frame, current_frame);
+                atomic_store(&preload_ring_tail, (tail + 1) % RING_CAPACITY);
+                continue;
+            }
 
             int expected = BUF_EMPTY;
             if (atomic_compare_exchange_strong(&buf_state[buf], &expected, BUF_LOADING)) {
-                // printf("🔧 Worker: Loading frame %d into buffer %d\n", frame, buf);
                 if (load_frame(frame, buf) == 0) {
                     atomic_store(&buf_state[buf], BUF_READY);
-                    // printf("🔧 Worker: Frame %d ready in buffer %d\n", frame, buf);
                 } else {
                     printf("❌ Worker: Failed to load frame %d\n", frame);
                     atomic_store(&buf_state[buf], BUF_EMPTY);
                 }
             } else {
-                printf("🔧 Worker: Buffer %d already in use for frame %d\n", buf, frame);
+                // Handle buffer conflicts more gracefully
+                int current_state = atomic_load(&buf_state[buf]);
+                if (current_state == BUF_READY) {
+                    // Buffer already has a ready frame, this is likely a duplicate request
+                    printf("🔧 Buffer %d already ready, skipping duplicate frame %d request\n", buf, frame);
+                } else if (current_state == BUF_LOADING) {
+                    // Another thread is already loading this buffer
+                    printf("🔧 Buffer %d already loading, skipping frame %d\n", buf, frame);
+                } else {
+                    // Unexpected state
+                    printf("🔧 Worker: Buffer %d in unexpected state %d for frame %d\n", buf, current_state, frame);
+                }
             }
 
-            // ✅ FIX: Advance tail pointer correctly
+            // Always advance tail to prevent getting stuck
             atomic_store(&preload_ring_tail, (tail + 1) % RING_CAPACITY);
         }
         
@@ -435,15 +495,11 @@ void *worker_thread(void *p) {
 }
 
 
-    #define VIDEO_START_FRAME 0
-    #define MIN(a,b) ((a) < (b) ? (a) : (b))
-    #define MAX(a,b) ((a) > (b) ? (a) : (b))
-
 
 
     int main(int argc, char **argv) {
         // atomic_store(&frame_index, 31438); // outtakes for Dragon's Lair
-        atomic_store(&frame_index,170);
+        atomic_store(&frame_index,0);
         int current_frame = atomic_load(&frame_index);
         // profiler_init("/pc/gmon.out");
         // profiler_start();
@@ -518,47 +574,44 @@ void *worker_thread(void *p) {
         printf("Frame timing: %ffps = %.3fms per frame\n", fps, frame_time_ms);
         atomic_store(&audio_muted, 1);
         snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
-// ✅ Start worker before pushing preload jobs
-wthread = thd_create(0, worker_thread, NULL);
+        // ✅ Start worker before pushing preload jobs
+        wthread = thd_create(0, worker_thread, NULL);
 
-// 🔁 Let worker run at least a frame
-thd_sleep(10);  // Allow ~10ms for worker to dequeue from ring
+        // 🔁 Let worker run at least a frame
+        thd_sleep(30);  // Allow ~10ms for worker to dequeue from ring
         atomic_store(&seek_request,current_frame);
-// 🔁 Prime ring with preload jobs
-// for (int i = 0; i < NUM_BUFFERS; i++) {
-//     int preload_frame_id = current_frame + i;
-//     if (preload_frame_id >= num_frames) break;
-//     schedule_frame_preload(preload_frame_id);
-// }
+        // 🔁 Prime ring with preload jobs
+        // for (int i = 0; i < NUM_BUFFERS; i++) {
+        //     int preload_frame_id = current_frame + i;
+        //     if (preload_frame_id >= num_frames) break;
+        //     schedule_frame_preload(preload_frame_id);
+        // }
 
-// // ✅ Wait until those buffers are ready
-// for (int i = 0; i < NUM_BUFFERS; i++) {
-//     int preload_frame_id = current_frame + i;
-//     if (preload_frame_id >= num_frames) break;
+        // // ✅ Wait until those buffers are ready
+        // for (int i = 0; i < NUM_BUFFERS; i++) {
+        //     int preload_frame_id = current_frame + i;
+        //     if (preload_frame_id >= num_frames) break;
 
-//     int buf_id = preload_frame_id % NUM_BUFFERS;
-//     int wait = 0;
-//     while (atomic_load(&buf_state[buf_id]) != BUF_READY && wait++ < 100) {
-//         thd_sleep(1);
-//     }
+        //     int buf_id = preload_frame_id % NUM_BUFFERS;
+        //     int wait = 0;
+        //     while (atomic_load(&buf_state[buf_id]) != BUF_READY && wait++ < 100) {
+        //         thd_sleep(1);
+        //     }
 
-//     if (atomic_load(&buf_state[buf_id]) != BUF_READY) {
-//         printf("⚠️ Timeout waiting for preload of frame %d (buf %d)\n", preload_frame_id, buf_id);
-//     }
-// }
+        //     if (atomic_load(&buf_state[buf_id]) != BUF_READY) {
+        //         printf("⚠️ Timeout waiting for preload of frame %d (buf %d)\n", preload_frame_id, buf_id);
+        //     }
+        // }
 
-printf("✅ All initial frames ready. Starting at frame %d\n", current_frame);
-printf("Starting at frame %d\n", current_frame);
+    printf("✅ All initial frames ready. Starting at frame %d\n", current_frame);
+    printf("Starting at frame %d\n", current_frame);
 
-
-    // Add these variables at the top
-    double accumulated_frame_debt = 0.0;  // Track cumulative timing debt
-    // double last_frame_end_time = 0.0;
+    double accumulated_frame_debt = 0.0;
     int frames_dropped = 0;
-    // double frame_end_time = 0.0;
     double max_frame_time = 0.0;
     double avg_frame_time = 0.0;
     double frame_time_samples = 0.0;
+    int stall_count = 0;  // Move this here so seek can reset it
 
 
     // if (load_frame(atomic_load(&frame_index), 0) != 0) {
@@ -569,25 +622,18 @@ printf("Starting at frame %d\n", current_frame);
         int requested_seek = atomic_exchange(&seek_request, -1);
         int current_frame = atomic_load(&frame_index);        
         double loop_timer_ms = psTimer();
+        
         if (requested_seek != -1) {
-            printf("Seeking to frame %d\n",requested_seek);
+            printf("Seeking to frame %d\n", requested_seek);
             seek_to_frame(requested_seek);
-            current_frame = requested_seek;
-            accumulated_frame_debt = 0.0;
-            frame_start_time = loop_timer_ms;
-            schedule_frame_preload(current_frame);
-            // Wait for the sought frame to preload
-            int preload_buf = requested_seek % NUM_BUFFERS;
-            int retries = 0;
-            while (atomic_load(&buf_state[preload_buf]) != BUF_READY && retries++ < 100) {
-                thd_sleep(1);
-            }
-            if (retries >= 100) {
-                printf("⚠️ Timeout waiting for preload of frame %d (buf %d)\n", requested_seek, preload_buf);
-            }
-                frame_start_time = psTimer();
             
-            continue; // Continue loop so preload can happen cleanly
+            // **CRITICAL FIX**: Reset state after seek
+            current_frame = atomic_load(&frame_index);
+            accumulated_frame_debt = 0.0;
+            stall_count = 0;
+            frame_start_time = psTimer();
+            
+            continue;
         }
 
 
@@ -635,33 +681,61 @@ printf("Starting at frame %d\n", current_frame);
     // static int last_drawn_frame = -1;
         
     double frame_render_start = psTimer();
+    static int stall_count = 0;
     if (current_audio_time_ms >= target_time_ms) {
-    
-        int draw_frame_id = atomic_load(&frame_index);
-        int buf_index = draw_frame_id % NUM_BUFFERS;
-        // printf("🧪 Frame %d | buf %d | state=%d\n", draw_frame_id, buf_index, atomic_load(&buf_state[buf_index]));
-        if (atomic_load_explicit(&buf_state[buf_index], memory_order_acquire) == BUF_READY) {
-            // printf("Draw Frame %d from buf_index %d\n",draw_frame_id,buf_index);
-            draw_frame(buf_index, draw_frame_id);
-            atomic_store_explicit(&buf_state[buf_index], BUF_EMPTY, memory_order_release);
+            int draw_frame_id = atomic_load(&frame_index);
+            int buf_index = draw_frame_id % NUM_BUFFERS;
+            
+            if (atomic_load_explicit(&buf_state[buf_index], memory_order_acquire) == BUF_READY) {
+                draw_frame(buf_index, draw_frame_id);
+                atomic_store_explicit(&buf_state[buf_index], BUF_EMPTY, memory_order_release);
 
-            int next_frame = draw_frame_id + 1;
-            int next_buf = next_frame % NUM_BUFFERS;
-
-            if (atomic_load(&buf_state[next_buf]) == BUF_EMPTY) {
-                schedule_frame_preload(next_frame);
-            }
-
-            atomic_fetch_add(&frame_index, 1);
-        } else {
-            static int stall_count = 0;
-            if (++stall_count > 3) {
-                printf("⚠️ Emergency advancing past stalled frame %d\n", draw_frame_id);
-                atomic_fetch_add(&frame_index, 1);
+                // Reset stall count on successful frame
                 stall_count = 0;
+
+                // Schedule next frames
+                int frames_to_schedule = 3;
+                for (int i = 1; i <= frames_to_schedule; i++) {
+                    int next_frame = draw_frame_id + i;
+                    if (next_frame >= num_frames) break;
+                    
+                    int next_buf = next_frame % NUM_BUFFERS;
+                    if (atomic_load(&buf_state[next_buf]) == BUF_EMPTY) {
+                        if (!schedule_frame_preload(next_frame)) {
+                            break;
+                        }
+                    }
+                }
+
+                atomic_fetch_add(&frame_index, 1);
+                
+            } else {
+                // **IMPROVED STALL HANDLING**
+                stall_count++;
+                
+                // Try to reschedule the current frame if it's empty
+                if (atomic_load(&buf_state[buf_index]) == BUF_EMPTY) {
+                    schedule_frame_preload(draw_frame_id);
+                }
+                
+                // Only emergency advance after more attempts
+                if (stall_count > 10) {  // Increased threshold
+                    printf("⚠️ Emergency advancing past stalled frame %d (stall_count=%d)\n", 
+                           draw_frame_id, stall_count);
+                    atomic_store_explicit(&buf_state[buf_index], BUF_EMPTY, memory_order_release);
+                    atomic_fetch_add(&frame_index, 1);
+                    stall_count = 0;
+                    
+                    // Try to recover by scheduling more frames
+                    for (int i = 0; i < 3; i++) {
+                        int recovery_frame = atomic_load(&frame_index) + i;
+                        if (recovery_frame < num_frames) {
+                            schedule_frame_preload(recovery_frame);
+                        }
+                    }
+                }
             }
         }
-    }
 
         // Timing tracking...
         double frame_render_end = psTimer();
@@ -712,7 +786,7 @@ printf("Starting at frame %d\n", current_frame);
     }
     // printf("Final stats - Frames dropped: %d, Max frame time: %.1fms, Avg frame time: %.1fms\n",
     //        frames_dropped, max_frame_time, avg_frame_time);
-
+    atomic_store(&audio_muted, 1);
         // profiler_stop();
         // profiler_clean_up();
         // Clean up

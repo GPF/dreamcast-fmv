@@ -15,7 +15,7 @@
 # - ffmpeg (for video and audio extraction)
 # - dcaconv (TapamN’s Dreamcast ADPCM encoder: https://github.com/TapamN/dcaconv)
 # - pvrtex (KOS utility for RGB565 VQ texture generation)
-# - pack_dcmv (custom LZ4-based video+audio packer)
+# - pack_dcmv (custom zstd-based video+audio packer)
 #
 # Customize the variables below (input path, resolution, audio settings, etc.)
 # before running the script to match your desired output.
