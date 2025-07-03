@@ -40,9 +40,9 @@
     #include <string.h>
     #include <stdatomic.h>
     #include <lz4/lz4.h>
-    #define ZSTD_STATIC_LINKING_ONLY
-    #include <zstd/zstd.h>
-    static ZSTD_DCtx *dctx = NULL;
+    // #define ZSTD_STATIC_LINKING_ONLY
+    // #include <zstd/zstd.h>
+    // static ZSTD_DCtx *dctx = NULL;
 
     #define DCMV_MAGIC "DCMV"
     #define VIDEO_FILE "/pc/movie.dcmv"
@@ -134,22 +134,22 @@
 
         // fread(frame_buffer, 1, compressed_size, fp);
 
-        // int res = LZ4_decompress_fast(
-        //     (const char *)compressed_buffer,
-        //     (char *)frame_buffer,
-        //     video_frame_size);
+        int res = LZ4_decompress_fast(
+            (const char *)compressed_buffer,
+            (char *)frame_buffer[buf_index],
+            video_frame_size);
 
-        // if (res < 0) {
-        //     printf("❌ LZ4 decompression failed on frame %d\n", frame_num);
-        //     return -1;
-        // }        
+        if (res < 0) {
+            printf("❌ LZ4 decompression failed on frame %d\n", frame_num);
+            return -1;
+        }        
 
         // ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);
         // printf("🧩 Decompressing frame %d into buffer %d\n", frame_num, buf_index);
 
-        size_t decompressed = ZSTD_decompressDCtx(dctx, frame_buffer[buf_index], video_frame_size,
-                                                compressed_buffer, compressed_size);
-        // if (ZSTD_isError(decompressed)) {
+        // size_t decompressed = ZSTD_decompressDCtx(dctx, frame_buffer[buf_index], video_frame_size,
+        //                                         compressed_buffer, compressed_size);
+        // // if (ZSTD_isError(decompressed)) {
         //     printf("❌ ZSTD decompress failed on frame %d: %s\n", frame_num, ZSTD_getErrorName(decompressed));
         //     return -1;
                                                         
@@ -499,19 +499,19 @@ void *worker_thread(void *p) {
 
     int main(int argc, char **argv) {
         // atomic_store(&frame_index, 31438); // outtakes for Dragon's Lair
-        atomic_store(&frame_index,0);
+        atomic_store(&frame_index,170);
         int current_frame = atomic_load(&frame_index);
         // profiler_init("/pc/gmon.out");
         // profiler_start();
 
-        dctx = ZSTD_createDCtx();
-        ZSTD_DCtx_setParameter(dctx, ZSTD_d_format, ZSTD_f_zstd1_magicless);
-        ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 15);
-        ZSTD_DCtx_setParameter(dctx, ZSTD_d_forceIgnoreChecksum, 1);
-        ZSTD_DCtx_setParameter(dctx, ZSTD_d_refMultipleDDicts, ZSTD_rmd_refSingleDDict);
-        ZSTD_DCtx_setParameter(dctx, ZSTD_d_maxBlockSize, 65536);
-        ZSTD_DCtx_refDDict(dctx, NULL);
-        ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);    
+        // dctx = ZSTD_createDCtx();
+        // ZSTD_DCtx_setParameter(dctx, ZSTD_d_format, ZSTD_f_zstd1_magicless);
+        // ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 15);
+        // ZSTD_DCtx_setParameter(dctx, ZSTD_d_forceIgnoreChecksum, 1);
+        // ZSTD_DCtx_setParameter(dctx, ZSTD_d_refMultipleDDicts, ZSTD_rmd_refSingleDDict);
+        // ZSTD_DCtx_setParameter(dctx, ZSTD_d_maxBlockSize, 65536);
+        // ZSTD_DCtx_refDDict(dctx, NULL);
+        // ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);    
 
         fp = fopen(VIDEO_FILE, "rb");
         if (!fp || load_header() < 0) return -1;
@@ -611,8 +611,7 @@ void *worker_thread(void *p) {
     double max_frame_time = 0.0;
     double avg_frame_time = 0.0;
     double frame_time_samples = 0.0;
-    int stall_count = 0;  // Move this here so seek can reset it
-
+    int stall_count = 0; 
 
     // if (load_frame(atomic_load(&frame_index), 0) != 0) {
     //       printf("❌ Failed to load frame %d, skipping\n", atomic_load(&frame_index));

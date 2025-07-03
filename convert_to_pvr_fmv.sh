@@ -26,6 +26,7 @@
 
 # Settings
 # Configuration - User Adjustable
+# INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4"
 INPUT="/home/gpf/code/dreamcast/DirkSimple/lair.ogv"
 OUTPUT_DIR="output"
 TEMP_DIR="temp_frames"
@@ -52,14 +53,6 @@ FFMPEG_LOGLEVEL="warning"       # error/warning/info
 PVRTX_QUIET=">/dev/null 2>&1"   # Suppress pvrtex output
 
 # Dreamcast-specific optimizations
-  # FFMPEG_OPTS=(
-  #     -hide_banner
-  #     -loglevel "$FFMPEG_LOGLEVEL"
-  #     -y
-  #     -i "$INPUT"
-  #     -vf "fps=$FPS,scale=$WIDTH:$HEIGHT:flags=lanczos,hqdn3d=1.0:1.0:6.0:6.0,smartblur=1.0:0.0"
-  #     -sws_flags "+accurate_rnd+full_chroma_int+full_chroma_inp"
-  # )
 FFMPEG_OPTS=(
     -hide_banner
     -loglevel "$FFMPEG_LOGLEVEL"
@@ -71,8 +64,8 @@ FFMPEG_OPTS=(
 
 PVRTX_OPTS=(
   -f RGB565
-  -c 256
-  --dither 0
+  -c
+  --dither 1
 )
 # Setup directories
 mkdir -p "$OUTPUT_DIR" "$TEMP_DIR"
@@ -90,7 +83,7 @@ process_rgb565() {
 
     # Extract frames with optimized settings
     echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} RGB24..."
-    ffmpeg "${FFMPEG_OPTS[@]}" -pix_fmt rgb24 -start_number 0 "$TEMP_DIR/frame%05d.png" || exit 1
+    ffmpeg "${FFMPEG_OPTS[@]}" -pix_fmt rgb24 -start_number 0 -frames:v 31438 "$TEMP_DIR/frame%05d.png" || exit 1
 
     # Convert frames to VQ-compressed format
     echo "🎞️ Converting frames to VQ-compressed ${EXT}..."
@@ -111,28 +104,39 @@ process_rgb565() {
     fi
 }
 
+
 process_yuv420p() {
-    EXT="bin"
+    EXT="dt"
     FRAME_TYPE=0
-    local FRAME_SIZE=$((WIDTH * HEIGHT * 3 / 2))
+    echo "📁 Checking for existing $EXT frames..."
     
-    echo "🎥 Extracting raw YUV420p frames..."
-    ffmpeg "${FFMPEG_OPTS[@]}" -pix_fmt yuv420p -an "$TEMP_DIR/full.yuv" || exit 1
+    if compgen -G "$OUTPUT_DIR/frame*.${EXT}" >/dev/null; then
+        echo "✅ Found preconverted .${EXT} frames, skipping frame extraction and conversion."
+        return 0
+    fi
 
-    echo "✂️ Splitting raw YUV420p into individual frames..."
-    split -b "$FRAME_SIZE" -d -a 5 "$TEMP_DIR/full.yuv" "$TEMP_DIR/frame" --additional-suffix=".yuv"
+    # Extract frames with YUV420P pixel format
+    echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} YUV420P..."
+    ffmpeg "${FFMPEG_OPTS[@]}" -pix_fmt yuv420p -start_number 0 -frames:v 31438 "$TEMP_DIR/frame%05d.png" || exit 1
 
-    echo "🔀 Converting YUV frames to PVR macroblock format..."
-    local frame_idx=0
-    for yuv in "$TEMP_DIR"/frame*.yuv; do
-        local frame_num=$(printf "%05d" "$frame_idx")
-        local out_bin="$OUTPUT_DIR/frame${frame_num}.bin"
-        
-        $YUVCONVERTER "$yuv" "$out_bin" "$WIDTH" "$HEIGHT" -q || exit 1
-        ((frame_idx++))
-    done
+    # Convert frames to VQ-compressed format with YUV
+    echo "🎞️ Converting frames to VQ-compressed ${EXT} with YUV..."
+    
+    if command -v parallel >/dev/null; then
+        # Parallel processing if available
+        find "$TEMP_DIR" -name 'frame*.png' -print0 | \
+            parallel -0 -j "$THREADS" --bar \
+            "$PVRTX -i {} -o $OUTPUT_DIR/{/.}.$EXT ${PVRTX_OPTS[*]} $PVRTX_QUIET"
+    else
+        # Sequential fallback
+        local frame_idx=0
+        for png in "$TEMP_DIR"/frame*.png; do
+            local base=$(printf "frame%05d" "$frame_idx")
+            $PVRTX -i "$png" -o "$OUTPUT_DIR/${base}.${EXT}" "${PVRTX_OPTS[@]}" $PVRTX_QUIET || exit 1
+            ((frame_idx++))
+        done
+    fi
 }
-
 # Main processing
 case "$FORMAT" in
     rgb565)
