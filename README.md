@@ -74,5 +74,16 @@ https://github.com/user-attachments/assets/54731601-5f5e-420a-be52-f8ba33d16adc
 
 https://github.com/user-attachments/assets/5ef68680-6b25-4d52-a357-63b1aa6d9c12
 
+DirkSimple fmv video used with https://github.com/GPF/dirksimple port
+
+
+https://github.com/user-attachments/assets/7460e88a-bf33-4bbf-991d-49a049922172
+
+
+
+https://github.com/user-attachments/assets/f23d55a9-d797-44bd-9f86-f2aeac5dddef
+
+
+
 
 Feel free to fork, test on hardware, or suggest features.
