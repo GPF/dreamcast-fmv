@@ -1,0 +1,6 @@
+output/
+temp_frames/
+/input/*
+!/input/Dreamcast Startup (60fps).mp4
+.vscode/
+

@@ -26,8 +26,9 @@
 
 # Settings
 # Configuration - User Adjustable
-# INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4"
-INPUT="/home/gpf/code/dreamcast/DirkSimple/lair.ogv"
+
+# INPUT="input/lair.ogv"
+INPUT=input/cliff.ogv
 OUTPUT_DIR="output"
 TEMP_DIR="temp_frames"
 FPS=23.97
@@ -83,7 +84,9 @@ process_rgb565() {
 
     # Extract frames with optimized settings
     echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} RGB24..."
-    ffmpeg "${FFMPEG_OPTS[@]}" -pix_fmt rgb24 -start_number 0 -frames:v 31438 "$TEMP_DIR/frame%05d.png" || exit 1
+    # ffmpeg "${FFMPEG_OPTS[@]}" -pix_fmt rgb24 -start_number 0 -frames:v 31438 "$TEMP_DIR/frame%05d.png" || exit 1 #for dragon's lair
+    ffmpeg "${FFMPEG_OPTS[@]}" -pix_fmt rgb24 -start_number 0 "$TEMP_DIR/frame%05d.png" || exit 1 #for cliff hanger
+
 
     # Convert frames to VQ-compressed format
     echo "🎞️ Converting frames to VQ-compressed ${EXT}..."

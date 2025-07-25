@@ -499,7 +499,7 @@ void *worker_thread(void *p) {
 
     int main(int argc, char **argv) {
         // atomic_store(&frame_index, 31438); // outtakes for Dragon's Lair
-        atomic_store(&frame_index,170);
+        atomic_store(&frame_index,0);
         int current_frame = atomic_load(&frame_index);
         // profiler_init("/pc/gmon.out");
         // profiler_start();
