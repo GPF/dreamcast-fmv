@@ -1,297 +1,308 @@
-    /**
-     * fmv_play.c - Dreamcast FMV (Full Motion Video) Player
-     * -----------------------------------------------------
-     * This is the runtime video player for .dcmv containers, designed for the Sega Dreamcast.
-     * It loads and decompresses zstd-compressed VQ PVR textures on the fly and synchronizes
-     * them to ADPCM audio streamed via the KOS sound API.
-     *
-     * Features:
-     * - Parses custom DCMV v3 container format (video+audio in one file)
-     * - Uses zstd decompression for each video frame (compressed with zstd)
-     * - Leverages PVR DMA and VQ textures for efficient rendering
-     * - Streams audio using snd_stream with optional stereo/mono handling
-     * - Uses profiler integration for performance tuning
-     *
-     * Author: Troy Davis (GPF) — https://github.com/GPF
-     * License: Public Domain / MIT-style — use freely with attribution.
-     *
-     * Controls:
-     * - Press A: Take screenshot (/pc/screenshot#.ppm)
-     * - DPad Left and Right seek to +/-500 frames
-     * - Press any other button: Exit cleanly
-     *
-     * Dependencies:
-     * - KallistiOS (KOS)
-     * - zstd
-     * - dcprofiler (optional, used for analysis)
-     *
-     * Related tools:
-     * - pack_dcmv (zstd-based container builder)
-     * - convert_to_pvr_fmv.sh (FFmpeg + pvrtex + dcaconv automation)
-     */
+/**
+ * fmv_play.c - Dreamcast FMV (Full Motion Video) Player
+ * -----------------------------------------------------
+ * This is the runtime video player for .dcmv containers, designed for the Sega Dreamcast.
+ * It loads and decompresses LZ4-compressed VQ PVR textures on the fly and synchronizes
+ * them to ADPCM audio streamed via the KOS sound API.
+ *
+ * Features:
+ * - Parses custom DCMV v4 container format (video+audio in one file)
+ * - Supports both strided and power-of-two texture formats
+ * - Uses LZ4 decompression for each video frame
+ * - Leverages PVR DMA and VQ textures for efficient rendering
+ * - Streams audio using snd_stream with optional stereo/mono handling
+ * - Uses profiler integration for performance tuning
+ *
+ * Author: Troy Davis (GPF) — https://github.com/GPF
+ * License: Public Domain / MIT-style — use freely with attribution.
+ *
+ * Controls:
+ * - Press A: Take screenshot (/pc/screenshot#.ppm)
+ * - DPad Left and Right seek to +/-500 frames
+ * - Press any other button: Exit cleanly
+ *
+ * Dependencies:
+ * - KallistiOS (KOS)
+ * - LZ4
+ * - dcprofiler (optional, used for analysis)
+ *
+ * Related tools:
+ * - pack_dcmv (LZ4-based container builder)
+ * - convert_to_pvr_fmv.sh (FFmpeg + pvrtex + dcaconv automation)
+ */
 
-    #include <kos.h>
-    #include <dc/sound/stream.h>
-    #include <dc/sound/sound.h>
-    #include <dc/pvr.h>
-    #include <dc/maple/controller.h>
-    #include <stdio.h>
-    #include <stdlib.h>
-    #include <string.h>
-    #include <stdatomic.h>
-    #include <lz4/lz4.h>
-    // #define ZSTD_STATIC_LINKING_ONLY
-    // #include <zstd/zstd.h>
-    // static ZSTD_DCtx *dctx = NULL;
+#include <kos.h>
+#include <dc/sound/stream.h>
+#include <dc/sound/sound.h>
+#include <dc/pvr.h>
+#include <dc/maple/controller.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdatomic.h>
+#include <lz4/lz4.h>
 
-    #define DCMV_MAGIC "DCMV"
-    #define VIDEO_FILE "/pc/movie.dcmv"
+#define DCMV_MAGIC "DCMV"
+#define VIDEO_FILE "/pc/movie.dcmv"
 
-    static FILE *fp = NULL, *audio_fp = NULL;
-    static uint8_t *compressed_buffer = NULL;
-    static uint32_t *frame_offsets = NULL;
-    static atomic_int frame_index =0 ;
-    static float fps;
-    static int frame_type, video_width, video_height, sample_rate, num_frames, video_frame_size, audio_channels, max_compressed_size, audio_offset;
-    static atomic_int audio_bytes_fed = 0;
-    snd_stream_hnd_t stream;
-    static kthread_t *wthread;
-    static atomic_int audio_muted = 0;
-    float start_time;
-    static float frame_duration = 1.0f / 30.0f; // Default, overwritten after header read
-    // static double audio_start_time = 0.0;
-    static _Atomic double audio_start_time_ms = 0.0;
-    // static float audio_time_offset = 0.0f;
-    static atomic_int seek_request = -1;
-    static double frame_start_time = 0.0;
-    // static int current_frame = 0;
-    pvr_ptr_t pvr_txr;
-    pvr_poly_hdr_t hdr;
-    pvr_vertex_t vert[4];
-    char screenshotfilename[256];
+static FILE *fp = NULL, *audio_fp_left = NULL, *audio_fp_right = NULL;
+static long left_channel_size = 0;
+static uint8_t *compressed_buffer = NULL;
+static uint32_t *frame_offsets = NULL;
+static atomic_int frame_index = 0;
+static float fps;
+static int frame_type, video_width, video_height, content_width, content_height, sample_rate, num_frames, video_frame_size, audio_channels, max_compressed_size, audio_offset;
+static atomic_int audio_bytes_fed = 0;
+snd_stream_hnd_t stream;
+static kthread_t *wthread;
+static atomic_int audio_muted = 0;
+float start_time;
+static float frame_duration = 1.0f / 30.0f; // Default, overwritten after header read
+static _Atomic double audio_start_time_ms = 0.0;
+static atomic_int seek_request = -1;
+static double frame_start_time = 0.0;
+pvr_ptr_t pvr_txr;
+pvr_poly_hdr_t hdr;
+pvr_vertex_t vert[4];
+char screenshotfilename[256];
 
+#define VIDEO_START_FRAME 0
+#define MIN(a,b) ((a) < (b) ? (a) : (b))
+#define MAX(a,b) ((a) > (b) ? (a) : (b))
 
-    #define VIDEO_START_FRAME 0
-    #define MIN(a,b) ((a) < (b) ? (a) : (b))
-    #define MAX(a,b) ((a) > (b) ? (a) : (b))
+#define NUM_BUFFERS 16
+static uint8_t *frame_buffer[NUM_BUFFERS];
+#define INVALID_FRAME -1
+enum BufState {
+    BUF_EMPTY = 0,
+    BUF_LOADING = 1,
+    BUF_READY = 2
+};
+#define RING_CAPACITY NUM_BUFFERS + 1
+static atomic_int preload_ring_head = 0;
+static atomic_int preload_ring_tail = 0;
+static atomic_int preload_ring[RING_CAPACITY];
 
-    #define NUM_BUFFERS 16
-    static uint8_t *frame_buffer[NUM_BUFFERS];
-    // static volatile int ready[NUM_BUFFERS] = {0, 0, 0};
-    #define INVALID_FRAME -1
-    // static atomic_int preload_frame = INVALID_FRAME;
-    // static int preload_buf = 0;
-    enum BufState {
-        BUF_EMPTY = 0,
-        BUF_LOADING = 1,
-        BUF_READY = 2
-    };
-    #define RING_CAPACITY NUM_BUFFERS + 1
-    static atomic_int preload_ring_head = 0;
-    static atomic_int preload_ring_tail = 0;
-    static atomic_int preload_ring[RING_CAPACITY];
+_Atomic int buf_state[NUM_BUFFERS] = { BUF_EMPTY, BUF_EMPTY, BUF_EMPTY };
 
+static volatile int audio_started = 0;
+int soundbufferalloc = 8192;
+static volatile float current_audio_frame = 0;
 
-    _Atomic int buf_state[NUM_BUFFERS] = { BUF_EMPTY, BUF_EMPTY, BUF_EMPTY };
+static inline double psTimer(void)
+{
+    // Clock off AICA
+    //
+    // according to purist, sh4 is 199.5MHz (KOS assumes 200 mhz)
+    // and the sh4 has a different clock domain from AICA
+    //
+    // This solves the sound drift issue in the part 2 of the intro
+    //
+    // N.B. This depends on the jiffies per second from AICA
+    //      and only works after AICA has been initialized
+    #define AICA_MEM_CLOCK      0x021000    /* 4 bytes */
+    uint32_t jiffies = g2_read_32(SPU_RAM_UNCACHED_BASE + AICA_MEM_CLOCK);
+    return jiffies / 4.410f;
+}
 
+static int load_frame(int frame_num, int buf_index) {
+    uint32_t offset = frame_offsets[frame_num];
+    uint32_t next_offset = frame_offsets[frame_num + 1];
+    uint32_t compressed_size = next_offset - offset;
 
-    static volatile int audio_started = 0;
-    int soundbufferalloc = 8192;
-    static volatile float current_audio_frame = 0;
-
-    // static LZ4_DC_Stream lz4_ctx; 
-
-    static inline double psTimer(void)
-    {
-        // Clock off AICA
-        //
-        // according to purist, sh4 is 199.5MHz (KOS assumes 200 mhz)
-        // and the sh4 has a different clock domain from AICA
-        //
-        // This solves the sound drift issue in the part 2 of the intro
-        //
-        // N.B. This depends on the jiffies per second from AICA
-        //      and only works after AICA has been initialized
-        #define AICA_MEM_CLOCK      0x021000    /* 4 bytes */
-        uint32_t jiffies = g2_read_32(SPU_RAM_UNCACHED_BASE + AICA_MEM_CLOCK);
-        return jiffies / 4.410f;
-    }
-
-    // double psTimer_seconds(void) {
-    //     uint32_t jiffies = g2_read_32(SPU_RAM_UNCACHED_BASE + AICA_MEM_CLOCK);
-    //     return jiffies / 4410.0; // Convert to seconds (not milliseconds)
-    // }
-
-    static int load_frame(int frame_num, int buf_index) {
-        uint32_t offset = frame_offsets[frame_num];
-        uint32_t next_offset = frame_offsets[frame_num + 1];
-        uint32_t compressed_size = next_offset - offset;
-
-        fseek(fp, offset, SEEK_SET);
-        fread(compressed_buffer, 1, compressed_size, fp);
-            
-        // double start = psTimer();
-
-        // fread(frame_buffer, 1, compressed_size, fp);
-
-        int res = LZ4_decompress_fast(
-            (const char *)compressed_buffer,
-            (char *)frame_buffer[buf_index],
-            video_frame_size);
-
-        if (res < 0) {
-            printf("❌ LZ4 decompression failed on frame %d\n", frame_num);
-            return -1;
-        }        
-
-        // ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);
-        // printf("🧩 Decompressing frame %d into buffer %d\n", frame_num, buf_index);
-
-        // size_t decompressed = ZSTD_decompressDCtx(dctx, frame_buffer[buf_index], video_frame_size,
-        //                                         compressed_buffer, compressed_size);
-        // // if (ZSTD_isError(decompressed)) {
-        //     printf("❌ ZSTD decompress failed on frame %d: %s\n", frame_num, ZSTD_getErrorName(decompressed));
-        //     return -1;
-                                                        
+    fseek(fp, offset, SEEK_SET);
+    fread(compressed_buffer, 1, compressed_size, fp);
         
-        // double end = psTimer();
-        // double ms = (end - start);  // Already in milliseconds
-        // // printf("🧩 Frame %d decompressed from %ld to %d in %.2f ms:\n", frame_num, compressed_size, video_frame_size, ms);
-        // printf("🧩 Finished frame %d in %.2f ms\n", frame_num, ms);
+    int res = LZ4_decompress_fast(
+        (const char *)compressed_buffer,
+        (char *)frame_buffer[buf_index],
+        video_frame_size);
 
-        // ready[buf_index] = 1;
-        return 0;
+    if (res < 0) {
+        printf("❌ LZ4 decompression failed on frame %d\n", frame_num);
+        return -1;
+    }        
+
+    return 0;
+}
+
+static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t req) {
+    // Correct atomic read
+    if (atomic_load(&audio_muted) == 1) {
+        printf("muted %d bytes\n", req);
+        memset((void *)l, 0, req);
+        if (audio_channels == 2)
+            memset((void *)r, 0, req);
+        return req;
+    }
+    printf("audio_cb %d bytes\n", req);
+    if (audio_channels == 2) {
+        size_t lbytes = fread((void *)l, 1, req/2, audio_fp_left);
+        size_t rbytes = fread((void *)r, 1, req/2, audio_fp_right);
+        atomic_fetch_add(&audio_bytes_fed, lbytes + rbytes);
+        return lbytes+ rbytes;
+    } else {
+        size_t bytes = fread((void *)l, 1, req, audio_fp_left);
+        atomic_fetch_add(&audio_bytes_fed, bytes);
+        if (bytes < req) {
+            printf("Warning: Audio underflow, requested=%zu, provided=%zu\n", req, bytes);
+        }
+        return bytes;
+    }
+}
+
+static int load_header(void) {
+    char magic[4];
+    fread(magic, 1, 4, fp);
+    if (memcmp(magic, DCMV_MAGIC, 4)) return -1;
+    
+    uint32_t version;
+    fread(&version, 4, 1, fp);
+    
+    if (version != 4) {
+        printf("❌ Unsupported DCMV version: %d (expected 4)\n", version);
+        return -1;
+    }
+    
+    fread(&frame_type, 1, 1, fp);
+    fread(&video_width, 2, 1, fp);
+    fread(&video_height, 2, 1, fp);
+    fread(&content_width, 2, 1, fp);    // New: content dimensions
+    fread(&content_height, 2, 1, fp);   // New: content dimensions
+    fread(&fps, sizeof(float), 1, fp); 
+    fread(&sample_rate, 2, 1, fp);
+    fread(&audio_channels, 2, 1, fp);
+    fread(&num_frames, 4, 1, fp);
+    fread(&video_frame_size, 4, 1, fp);
+    fread(&max_compressed_size, 4, 1, fp);
+    fread(&audio_offset, 4, 1, fp);
+
+    printf("📦 Header v%d: %s %dx%d (content: %dx%d) @ %.2ffps, %dHz, %dch, %d frames, frame_size=%d, max_compressed_size=%d, audio_offset=0x%X\n",
+        version, frame_type == 1 ? "YUV422" : "RGB565", video_width, video_height, content_width, content_height, fps, sample_rate, audio_channels, num_frames, video_frame_size, max_compressed_size, audio_offset);
+
+    return 0;
+}
+
+// Helper function to check if a number is power of 2
+static int is_power_of_2(int n) {
+    return n > 0 && (n & (n - 1)) == 0;
+}
+
+static int init_pvr(int frame_type) {
+    pvr_init_defaults();
+    
+    // Determine if we need strided mode (non-power-of-2 dimensions)
+    int use_strided = !is_power_of_2(video_width) || !is_power_of_2(video_height);
+    
+    // Allocate PVR memory
+    if (frame_type == 1) {
+        // YUV422 - always uses 2 bytes per pixel
+        pvr_txr = pvr_mem_malloc(video_width * video_height * 2);
+    } else {
+        // RGB565 VQ - use the exact frame size from header
+        pvr_txr = pvr_mem_malloc(video_frame_size);
+    }
+    
+    if (!pvr_txr) {
+        printf("❌ Failed to allocate PVR memory!\n");
+        return -1;
     }
 
-
-    static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t req) {
-        // Correct atomic read
-        if (atomic_load(&audio_muted) == 1) {
-            printf("muted %d bytes\n", req);
-            memset((void *)l, 0, req);
-            if (audio_channels == 2)
-                memset((void *)r, 0, req);
-            return req;
+    pvr_poly_cxt_t cxt;
+    
+    if (use_strided) {
+        printf("📐 Using STRIDED texture mode for %s: %dx%d\n", 
+               frame_type == 1 ? "YUV422" : "RGB565", video_width, video_height);
+        
+        int txr_format;
+        if (frame_type == 1) {
+            // YUV422 strided
+            txr_format = PVR_TXRFMT_YUV422 | PVR_TXRFMT_VQ_ENABLE | PVR_TXRFMT_NONTWIDDLED | (1 << 25);
+        } else {
+            // RGB565 strided
+            txr_format = PVR_TXRFMT_RGB565 | PVR_TXRFMT_VQ_ENABLE | PVR_TXRFMT_NONTWIDDLED | (1 << 25);
         }
         
-        if (audio_channels == 2) {
-            size_t lbytes = fread((void *)l, 1, req / 2, audio_fp);
-            size_t rbytes = fread((void *)r, 1, req / 2, audio_fp);
-            atomic_fetch_add(&audio_bytes_fed, lbytes + rbytes);
-            return lbytes + rbytes;
-        } else {
-            size_t bytes = fread((void *)l, 1, req, audio_fp);
-            atomic_fetch_add(&audio_bytes_fed, bytes);
-            if (bytes < req) {
-                printf("Warning: Audio underflow, requested=%zu, provided=%zu\n", req, bytes);
-            }
-            return bytes;
-        }
-    }
+        // Find next power of 2 dimensions for texture setup
+        int pot_width = 1, pot_height = 1;
+        while (pot_width < video_width) pot_width <<= 1;
+        while (pot_height < video_height) pot_height <<= 1;
+        
+        pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
+                         txr_format,
+                         pot_width, pot_height, pvr_txr, PVR_FILTER_BILINEAR);
+        pvr_poly_compile(&hdr, &cxt);
+        
+        // Set stride modulo for non-POT textures
+        PVR_SET(PVR_TEXTURE_MODULO, (video_width / 32));
+        
+        // Set up vertices for strided rendering - map content area to full screen
+        vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=0, .z=1, .u=0, .v=0, .argb=0xffffffff};
+        vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=640, .y=0, .z=1, .u=(float)content_width/pot_width, .v=0, .argb=0xffffffff};
+        vert[2] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=480, .z=1, .u=0, .v=(float)content_height/pot_height, .argb=0xffffffff};
+        vert[3] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX_EOL, .x=640, .y=480, .z=1, .u=(float)content_width/pot_width, .v=(float)content_height/pot_height, .argb=0xffffffff};
 
-    static int load_header(void) {
-        char magic[4];
-        fread(magic, 1, 4, fp);
-        if (memcmp(magic, DCMV_MAGIC, 4)) return -1;
-        uint32_t version;
-        fread(&version, 4, 1, fp);
-        fread(&frame_type, 1, 1, fp);
-        fread(&video_width, 2, 1, fp);
-        fread(&video_height, 2, 1, fp);
-        fread(&fps, sizeof(float), 1, fp); 
-        fread(&sample_rate, 2, 1, fp);
-        fread(&audio_channels, 2, 1, fp);
-        fread(&num_frames, 4, 1, fp);
-        fread(&video_frame_size, 4, 1, fp);
-        fread(&max_compressed_size, 4, 1, fp);
-        fread(&audio_offset, 4, 1, fp);
-
-        printf("📦 Header: %s %dx%d @ %ffps, %dHz, %dch, %d frames, frame_size=%d, max_compressed_size=%d, audio_offset=0x%X\n",
-            frame_type == 1 ? "YUV420P" : "RGB565", video_width, video_height, fps, sample_rate, audio_channels, num_frames, video_frame_size, max_compressed_size, audio_offset);
-
-        return 0;
-    }
-
-    static int init_pvr(int frame_type) {
-        // LZ4_DC_init(&lz4_ctx);
-            pvr_init_defaults();
+        // Set up vertices for strided rendering - match non-strided scaling
+        // float scaled_width = video_width * (640.0f / 512.0f);   // 320 * 1.25 = 400
+        // float scaled_height = video_height * (480.0f / 256.0f); // 240 * 1.875 = 450
+        
+        // float center_x = (640.0f - scaled_width) / 2.0f;   // (640 - 400) / 2 = 120
+        // float center_y = (480.0f - scaled_height) / 2.0f;  // (480 - 450) / 2 = 15
+        
+        // vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=center_x, .y=center_y, .z=1, .u=0, .v=0, .argb=0xffffffff};
+        // vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=center_x+scaled_width, .y=center_y, .z=1, .u=(float)video_width/pot_width, .v=0, .argb=0xffffffff};
+        // vert[2] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=center_x, .y=center_y+scaled_height, .z=1, .u=0, .v=(float)video_height/pot_height, .argb=0xffffffff};
+        // vert[3] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX_EOL, .x=center_x+scaled_width, .y=center_y+scaled_height, .z=1, .u=(float)video_width/pot_width, .v=(float)video_height/pot_height, .argb=0xffffffff};    
+        
+    } else {
+        printf("📐 Using POWER-OF-TWO texture mode: %dx%d\n", video_width, video_height);
+        
         if (frame_type == 1) {
-            pvr_txr = pvr_mem_malloc(video_width * video_height * 2);
-        } else {
-            pvr_txr = pvr_mem_malloc(video_frame_size);
-        }
-        if (!pvr_txr) return -1;
-
-        pvr_poly_cxt_t cxt;
-        if (frame_type == 1) {
-            // YUV422 texture setup
-            PVR_SET(PVR_YUV_ADDR, ((unsigned int)pvr_txr) & 0xffffff);
-            PVR_SET(PVR_YUV_CFG, (0x00 << 24) |
-                                (((video_height / 16) - 1) << 8) |
-                                ((video_width / 16) - 1));
-            PVR_GET(PVR_YUV_CFG);
-
+            // YUV422 power-of-2 (original method)
             pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
-                            PVR_TXRFMT_YUV422 | PVR_TXRFMT_NONTWIDDLED,
-                            video_width, video_height, pvr_txr, PVR_FILTER_BILINEAR);
+                PVR_TXRFMT_YUV422 | PVR_TXRFMT_TWIDDLED | PVR_TXRFMT_VQ_ENABLE,
+                video_width, video_height, pvr_txr, PVR_FILTER_BILINEAR);
             pvr_poly_compile(&hdr, &cxt);
-            hdr.mode3 |= PVR_TXRFMT_STRIDE;
         } else {
-            // RGB565 + VQ
+            // RGB565 + VQ power-of-2 (original method)
             pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
                             PVR_TXRFMT_RGB565 | PVR_TXRFMT_TWIDDLED | PVR_TXRFMT_VQ_ENABLE,
                             video_width, video_height, pvr_txr, PVR_FILTER_BILINEAR);
             pvr_poly_compile(&hdr, &cxt);
         }
-
+        
+        // Standard full-screen vertices for power-of-2 textures
         vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=0, .z=1, .u=0, .v=0, .argb=0xffffffff};
         vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=640, .y=0, .z=1, .u=1, .v=0, .argb=0xffffffff};
         vert[2] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=0, .y=480, .z=1, .u=0, .v=1, .argb=0xffffffff};
         vert[3] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX_EOL, .x=640, .y=480, .z=1, .u=1, .v=1, .argb=0xffffffff};
-
-        // vert[0] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=80, .y=0, .z=1, .u=0.1875f, .v=0.03125f, .argb=0xffffffff};     // Top-left
-        // vert[1] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=560, .y=0, .z=1, .u=0.8125f, .v=0.03125f, .argb=0xffffffff};    // Top-right
-        // vert[2] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX, .x=80, .y=480, .z=1, .u=0.1875f, .v=0.96875f, .argb=0xffffffff};   // Bottom-left
-        // vert[3] = (pvr_vertex_t){.flags = PVR_CMD_VERTEX_EOL, .x=560, .y=480, .z=1, .u=0.8125f, .v=0.96875f, .argb=0xffffffff}; // Bottom-right    
-
-        
-
-        return 0;
     }
 
-    void draw_frame(int buf_index, int frame_id) {
-        // if (!ready[buf_index]) return; 
-        if (frame_type == 1) {
-            // dcache_flush_range((uintptr_t)frame_buffer, (uintptr_t)(frame_buffer + video_frame_size));
-            // pvr_dma_transfer(frame_buffer, PVR_TA_YUV_CONV, video_frame_size, PVR_DMA_YUV, true, NULL, NULL);
-            // sq_cpy((void *)0x10800000, (void *)frame_buffer, video_frame_size);
-            pvr_sq_load(NULL, frame_buffer[buf_index], video_frame_size, PVR_DMA_YUV);
-            
-        } else {
-            // printf("🎬 Drawing frame %d from buffer %d\n", frame_id, buf_index);
+    return 0;
+}
 
-            // dcache_flush_range((uintptr_t)frame_buffer[buf_index],(uintptr_t)(frame_buffer[buf_index] + video_frame_size));
-            pvr_txr_load(frame_buffer[buf_index], pvr_txr, video_frame_size);
 
-        }
-        // ready[buf_index] = 0;
-        pvr_scene_begin();
-        pvr_list_begin(PVR_LIST_OP_POLY);
-        pvr_dr_state_t dr;
-        pvr_dr_init(&dr);
+void draw_frame(int buf_index, int frame_id) {
+    // dcache_flush_range((uintptr_t)frame_buffer[buf_index],(uintptr_t)(frame_buffer[buf_index] + video_frame_size));
+    pvr_txr_load(frame_buffer[buf_index], pvr_txr, video_frame_size);
+    // ready[buf_index] = 0;
+    pvr_scene_begin();
+    pvr_list_begin(PVR_LIST_OP_POLY);
+    pvr_dr_state_t dr;
+    pvr_dr_init(&dr);
 
-        // PVR TA store queue destination address
-        uintptr_t sq_dest_addr = (uintptr_t)SQ_MASK_DEST(PVR_TA_INPUT);
-        
-        // Submit polygon header
-        sq_fast_cpy((void *)sq_dest_addr, &hdr, 1);
-        // Submit 4 vertices
-        sq_fast_cpy((void *)sq_dest_addr, vert, 4);
+    // PVR TA store queue destination address
+    uintptr_t sq_dest_addr = (uintptr_t)SQ_MASK_DEST(PVR_TA_INPUT);
+    
+    // Submit polygon header
+    sq_fast_cpy((void *)sq_dest_addr, &hdr, 1);
+    // Submit 4 vertices
+    sq_fast_cpy((void *)sq_dest_addr, vert, 4);
 
-        pvr_dr_finish();
-        pvr_list_finish();
-        pvr_scene_finish();
-    }
+    pvr_dr_finish();
+    pvr_list_finish();
+    pvr_scene_finish();
+}
 
 bool schedule_frame_preload(int frame) {
   int buf = frame % NUM_BUFFERS;
@@ -333,112 +344,86 @@ void seek_to_frame(int new_frame) {
     if (new_frame < 0) new_frame = 0;
     if (new_frame >= num_frames) new_frame = num_frames - 1;
 
-    int old_frame = atomic_load(&frame_index);
-    double old_audio_time = atomic_load(&audio_start_time_ms);
-    
-    printf("🔄 Seeking from frame %d to frame %d\n", old_frame, new_frame);
-    
-    // Stop audio and close file
-    fclose(audio_fp);
+    // 1. Pause audio and clear buffers
     atomic_store(&audio_muted, 1);
-
-    // Clear frame buffers to prevent stale data
     for (int i = 0; i < NUM_BUFFERS; i++) {
         atomic_store(&buf_state[i], BUF_EMPTY);
-        printf("🔄 Cleared buffer %d\n", i);
     }
-
-    // Clear ring buffer properly
     atomic_store(&preload_ring_head, 0);
     atomic_store(&preload_ring_tail, 0);
-    printf("🔄 Ring buffer cleared\n");
 
-    // Calculate new audio position
+    // 2. Calculate audio positions (for split stereo layout)
     int samples_per_frame = (int)(sample_rate / fps);
-    int bytes_to_skip = ((new_frame * samples_per_frame) / 2 + 15) & ~0xF;
-    bytes_to_skip += audio_offset;
-    
-    // Reopen audio file at new position
-    audio_fp = fopen(VIDEO_FILE, "rb");
-    fseek(audio_fp, bytes_to_skip, SEEK_SET);
+    int bytes_per_frame_per_channel = samples_per_frame; // 4-bit ADPCM = 0.5 bytes/sample
+    bytes_per_frame_per_channel = (bytes_per_frame_per_channel + 15) & ~0xF; // Align to 16 bytes
 
-    // Update frame index FIRST
+    // Left channel offset
+    long left_offset = audio_offset + ((long)new_frame * bytes_per_frame_per_channel);
+    if (left_offset > (audio_offset + left_channel_size))
+        left_offset = audio_offset + left_channel_size; // Clamp to max left channel
+
+    // Right channel offset
+    long right_offset = audio_offset + left_channel_size + ((long)new_frame * bytes_per_frame_per_channel);
+    if (right_offset > (audio_offset + left_channel_size * 2))
+        right_offset = audio_offset + left_channel_size * 2; // Clamp to max right channel
+
+    // 3. Seek both audio file pointers
+    fseek(audio_fp_left, left_offset, SEEK_SET);
+    fseek(audio_fp_right, right_offset, SEEK_SET);
+
+    printf("🔊 Seeked to frame %d | left=0x%lX right=0x%lX\n", new_frame, left_offset, right_offset);
+
+    // 4. Update video state
     atomic_store(&frame_index, new_frame);
-    
-    // Schedule initial frames
-    printf("🔄 Rescheduling initial frames starting from %d\n", new_frame);
-    for (int i = 0; i < MIN(NUM_BUFFERS, 4) && (new_frame + i) < num_frames; i++) {
-        bool scheduled = schedule_frame_preload(new_frame + i);
-        printf("🔄 Frame %d scheduled: %s\n", new_frame + i, scheduled ? "YES" : "NO");
-    }
-
-    // **CRITICAL FIX**: Wait for first few frames to actually load
-    printf("🔄 Waiting for initial frames to load...\n");
-    for (int i = 0; i < MIN(3, NUM_BUFFERS) && (new_frame + i) < num_frames; i++) {
-        int frame_to_wait = new_frame + i;
-        int buf_to_wait = frame_to_wait % NUM_BUFFERS;
-        int wait_count = 0;
-        
-        while (atomic_load(&buf_state[buf_to_wait]) != BUF_READY && wait_count < 200) {
-            thd_sleep(1);
-            wait_count++;
-        }
-        
-        if (atomic_load(&buf_state[buf_to_wait]) == BUF_READY) {
-            printf("🔄 Frame %d ready in buffer %d\n", frame_to_wait, buf_to_wait);
-        } else {
-            printf("🔄 ⚠️ Frame %d not ready after waiting\n", frame_to_wait);
-        }
-    }
-
-    // **CRITICAL FIX**: Reset timing AFTER buffers are ready
     double current_time = psTimer();
     frame_start_time = current_time;
-    
-    // Calculate new audio timing
     double new_audio_time = (double)(new_frame * samples_per_frame) * 1000.0 / sample_rate;
     atomic_store(&audio_start_time_ms, new_audio_time);
     current_audio_frame = new_frame;
-    
-    printf("🔄 Seek complete: frame %d → %d | audio %.2fms → %.2fms | byte offset: %d\n",
-        old_frame, new_frame, old_audio_time, new_audio_time,
-        bytes_to_skip - audio_offset);
-    
-    // **CRITICAL FIX**: Reset accumulated debt and stall count
-    // (These should be global variables in your main function)
-    // accumulated_frame_debt = 0.0;
-    // stall_count = 0;
-    
-    // Restart audio LAST
+
+    // 5. Preload video frames
+    for (int i = 0; i < MIN(NUM_BUFFERS, 4) && (new_frame + i) < num_frames; i++) {
+        schedule_frame_preload(new_frame + i);
+    }
+
+    // 6. Wait for initial buffers (optional)
+    for (int i = 0; i < MIN(3, NUM_BUFFERS); i++) {
+        int buf_id = (new_frame + i) % NUM_BUFFERS;
+        for (int wait = 0; wait < 200 && !atomic_load(&buf_state[buf_id]); wait++) {
+            thd_sleep(1);
+        }
+    }
+
+    // 7. Resume playback
     atomic_store(&audio_muted, 0);
 }
 
 
 
-    static void wait_exit(void) {
-        static uint16_t prev_buttons = 0;
-        maple_device_t *dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
-        if (!dev) return;
+static void wait_exit(void) {
+    static uint16_t prev_buttons = 0;
+    maple_device_t *dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
+    if (!dev) return;
 
-        cont_state_t *state = (cont_state_t *)maple_dev_status(dev);
-        if (!state || !dev->status_valid) return;
+    cont_state_t *state = (cont_state_t *)maple_dev_status(dev);
+    if (!state || !dev->status_valid) return;
 
-        if (state->buttons == prev_buttons) return;
-        prev_buttons = state->buttons;
+    if (state->buttons == prev_buttons) return;
+    prev_buttons = state->buttons;
 
-        int current_frame = atomic_load(&frame_index);
-        
-        if (state->buttons & CONT_DPAD_RIGHT) {
-            atomic_store(&seek_request, current_frame + 500);
-        } else if (state->buttons & CONT_DPAD_LEFT) {
-            atomic_store(&seek_request, current_frame - 500);
-        } else if (state->buttons & CONT_A) {
-            sprintf(screenshotfilename, "/pc/screenshot%d.ppm", current_frame);
-            vid_screen_shot(screenshotfilename);
-        } else if (state->buttons) {
-            arch_exit();
-        }
+    int current_frame = atomic_load(&frame_index);
+    
+    if (state->buttons & CONT_DPAD_RIGHT) {
+        atomic_store(&seek_request, current_frame + 500);
+    } else if (state->buttons & CONT_DPAD_LEFT) {
+        atomic_store(&seek_request, current_frame - 500);
+    } else if (state->buttons & CONT_A) {
+        sprintf(screenshotfilename, "/pc/screenshot%d.ppm", current_frame);
+        vid_screen_shot(screenshotfilename);
+    } else if (state->buttons) {
+        arch_exit();
     }
+}
 
 
 void *worker_thread(void *p) {
@@ -524,10 +509,22 @@ void *worker_thread(void *p) {
         // Allocate buffer for compressed frames
         compressed_buffer = memalign(32, max_compressed_size);
         if (!compressed_buffer) return -1;
-        
+        long current_pos = ftell(fp);
+        fseek(fp, 0, SEEK_END);
+        long file_end = ftell(fp);
+
+        // Calculate total audio size
+        long total_audio_size = file_end - audio_offset;
+        if (audio_channels == 2) {
+            left_channel_size = total_audio_size / 2;
+        } else {
+            left_channel_size = total_audio_size;  // Mono: whole chunk
+        }
+        fseek(fp, current_pos, SEEK_SET);
         // int target_frame = (int)(current_time / frame_time) + frame_index;
         // Open the audio file and seek to the audio offset
-        audio_fp = fopen(VIDEO_FILE, "rb"); // Point to the same file as video
+        audio_fp_left = fopen(VIDEO_FILE, "rb"); // Point to the same file as video
+        audio_fp_right = fopen(VIDEO_FILE, "rb"); // Point to the same file as video
         // Allocate frame buffer
         for (int i = 0; i < NUM_BUFFERS; i++) {
             frame_buffer[i] = memalign(32, video_frame_size);
@@ -793,7 +790,8 @@ void *worker_thread(void *p) {
         snd_stream_stop(stream);
         snd_stream_destroy(stream);
         fclose(fp);
-        fclose(audio_fp);
+        fclose(audio_fp_left);
+        fclose(audio_fp_right);
         // free(frame_buffer);
         free(compressed_buffer);
         free(frame_offsets);
