@@ -40,12 +40,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <fastmem/fastmem.h>
+#define LZ4_memcpy(d,s,n) memcpy_fast((d),(s),(n))
+#define LZ4_memmove(d,s,n) memmove_fast((d),(s),(n))
+#define LZ4_memset(d,s,n) memset_fast((d),(s),(n))
+#define LZ4_FREESTANDING 1
 #include <lz4/lz4.h>
 
 #define DCMV_MAGIC "DCMV"
 #define VIDEO_FILE "/pc/movie.dcmv"
 
-static FILE *fp = NULL, *audio_fp_left = NULL, *audio_fp_right = NULL;
+// static FILE *fp = NULL, *audio_fp_left = NULL, *audio_fp_right = NULL;
+static file_t video_fd = -1;    // replaces FILE *fp
+static file_t audio_fd_left = -1, audio_fd_right = -1;
+
 static long left_channel_size = 0;
 static uint8_t *compressed_buffer = NULL;
 static uint32_t *frame_offsets = NULL;
@@ -70,7 +78,7 @@ char screenshotfilename[256];
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 
-#define NUM_BUFFERS 16
+#define NUM_BUFFERS 24
 static uint8_t *frame_buffer[NUM_BUFFERS];
 #define INVALID_FRAME -1
 enum BufState {
@@ -79,14 +87,25 @@ enum BufState {
     BUF_READY = 2
 };
 #define RING_CAPACITY NUM_BUFFERS + 1
+
+typedef struct {
+    int frame;
+    int generation;
+} PreloadJob;
+
+static PreloadJob preload_ring[RING_CAPACITY];
+
+static int GSeekGeneration = 0;  // Incremented on seek to invalidate stale jobs
 static atomic_int preload_ring_head = 0;
 static atomic_int preload_ring_tail = 0;
-static atomic_int preload_ring[RING_CAPACITY];
+
+#define PREFETCH_AHEAD 20  // How many frames ahead to keep loaded
+#define INITIAL_PRELOAD 3  // Frames to preload after seek
 
 _Atomic int buf_state[NUM_BUFFERS] = { BUF_EMPTY, BUF_EMPTY, BUF_EMPTY };
 
 static volatile int audio_started = 0;
-int soundbufferalloc = 8192;
+int soundbufferalloc = 4096;
 static volatile float current_audio_frame = 0;
 
 static inline double psTimer(void)
@@ -110,8 +129,10 @@ static int load_frame(int frame_num, int buf_index) {
     uint32_t next_offset = frame_offsets[frame_num + 1];
     uint32_t compressed_size = next_offset - offset;
 
-    fseek(fp, offset, SEEK_SET);
-    fread(compressed_buffer, 1, compressed_size, fp);
+    // fseek(fp, offset, SEEK_SET);
+    // fread(compressed_buffer, 1, compressed_size, fp);
+    fs_seek(video_fd, offset, SEEK_SET);
+    fs_read(video_fd, compressed_buffer, compressed_size);
         
     int res = LZ4_decompress_fast(
         (const char *)compressed_buffer,
@@ -135,14 +156,17 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t re
             memset((void *)r, 0, req);
         return req;
     }
-    printf("audio_cb %d bytes\n", req);
+    // printf("audio_cb %d bytes\n", req);
     if (audio_channels == 2) {
-        size_t lbytes = fread((void *)l, 1, req/2, audio_fp_left);
-        size_t rbytes = fread((void *)r, 1, req/2, audio_fp_right);
+        // size_t lbytes = fread((void *)l, 1, req/2, audio_fp_left);
+        // size_t rbytes = fread((void *)r, 1, req/2, audio_fp_right);
+        size_t lbytes = fs_read(audio_fd_left, (void *)l, req / 2);
+        size_t rbytes = fs_read(audio_fd_right, (void *)r, req / 2);        
         atomic_fetch_add(&audio_bytes_fed, lbytes + rbytes);
         return lbytes+ rbytes;
     } else {
-        size_t bytes = fread((void *)l, 1, req, audio_fp_left);
+        // size_t bytes = fread((void *)l, 1, req, audio_fp_left);
+        size_t bytes = fs_read(audio_fd_left, (void *)l, req);
         atomic_fetch_add(&audio_bytes_fed, bytes);
         if (bytes < req) {
             printf("Warning: Audio underflow, requested=%zu, provided=%zu\n", req, bytes);
@@ -153,32 +177,46 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t re
 
 static int load_header(void) {
     char magic[4];
-    fread(magic, 1, 4, fp);
+    // fread(magic, 1, 4, fp);
+    fs_read(video_fd, magic, 4);
     if (memcmp(magic, DCMV_MAGIC, 4)) return -1;
     
     uint32_t version;
-    fread(&version, 4, 1, fp);
+    // fread(&version, 4, 1, fp);
+    fs_read(video_fd, &version, 4);
     
     if (version != 4) {
         printf("❌ Unsupported DCMV version: %d (expected 4)\n", version);
         return -1;
     }
     
-    fread(&frame_type, 1, 1, fp);
-    fread(&video_width, 2, 1, fp);
-    fread(&video_height, 2, 1, fp);
-    fread(&content_width, 2, 1, fp);    // New: content dimensions
-    fread(&content_height, 2, 1, fp);   // New: content dimensions
-    fread(&fps, sizeof(float), 1, fp); 
-    fread(&sample_rate, 2, 1, fp);
-    fread(&audio_channels, 2, 1, fp);
-    fread(&num_frames, 4, 1, fp);
-    fread(&video_frame_size, 4, 1, fp);
-    fread(&max_compressed_size, 4, 1, fp);
-    fread(&audio_offset, 4, 1, fp);
+    // fread(&frame_type, 1, 1, fp);
+    // fread(&video_width, 2, 1, fp);
+    // fread(&video_height, 2, 1, fp);
+    // fread(&content_width, 2, 1, fp);    // New: content dimensions
+    // fread(&content_height, 2, 1, fp);   // New: content dimensions
+    // fread(&fps, sizeof(float), 1, fp); 
+    // fread(&sample_rate, 2, 1, fp);
+    // fread(&audio_channels, 2, 1, fp);
+    // fread(&num_frames, 4, 1, fp);
+    // fread(&video_frame_size, 4, 1, fp);
+    // fread(&max_compressed_size, 4, 1, fp);
+    // fread(&audio_offset, 4, 1, fp);
+    fs_read(video_fd, &frame_type, 1);
+    fs_read(video_fd, &video_width, 2);
+    fs_read(video_fd, &video_height, 2);
+    fs_read(video_fd, &content_width, 2);
+    fs_read(video_fd, &content_height, 2);
+    fs_read(video_fd, &fps, sizeof(float));
+    fs_read(video_fd, &sample_rate, 2);
+    fs_read(video_fd, &audio_channels, 2);
+    fs_read(video_fd, &num_frames, 4);
+    fs_read(video_fd, &video_frame_size, 4);
+    fs_read(video_fd, &max_compressed_size, 4);
+    fs_read(video_fd, &audio_offset, 4);    
 
-    printf("📦 Header v%d: %s %dx%d (content: %dx%d) @ %.2ffps, %dHz, %dch, %d frames, frame_size=%d, max_compressed_size=%d, audio_offset=0x%X\n",
-        version, frame_type == 1 ? "YUV422" : "RGB565", video_width, video_height, content_width, content_height, fps, sample_rate, audio_channels, num_frames, video_frame_size, max_compressed_size, audio_offset);
+    printf("📦 Header v%d: %s %dx%d (content: %dx%d) @ %.2ffps, %dHz, %dch %s, %d frames, frame_size=%d, max_compressed_size=%d, audio_offset=0x%X\n",
+        version, frame_type == 1 ? "YUV422" : "RGB565", video_width, video_height, content_width, content_height, fps, sample_rate, audio_channels, (audio_channels == 2 ? "Stereo" : "Mono"), num_frames, video_frame_size, max_compressed_size, audio_offset);
 
     return 0;
 }
@@ -304,48 +342,47 @@ void draw_frame(int buf_index, int frame_id) {
     pvr_scene_finish();
 }
 
+
+
 bool schedule_frame_preload(int frame) {
-  int buf = frame % NUM_BUFFERS;
-    
-    // Check if buffer is already in use
-    int current_state = atomic_load(&buf_state[buf]);
-    if (current_state != BUF_EMPTY) {
-        // Don't schedule if buffer is already occupied
-        return false;
-    }
-    
+    if (frame >= num_frames) return false;
+
+    int buf = frame % NUM_BUFFERS;
+    if (atomic_load(&buf_state[buf]) != BUF_EMPTY) return false;
+
     int head = atomic_load(&preload_ring_head);
     int tail = atomic_load(&preload_ring_tail);
     int next_head = (head + 1) % RING_CAPACITY;
+    if (next_head == tail) return false;
 
-    if (next_head == tail) {
-        return false; // Ring full
-    }
-
-    // Check for duplicates in ring
+    // Prevent duplicates
     for (int i = tail; i != head; i = (i + 1) % RING_CAPACITY) {
-        if (preload_ring[i] == frame) {
-            return false; // Already scheduled
-        }
-        
-        // Also check for buffer conflicts in ring
-        if ((preload_ring[i] % NUM_BUFFERS) == buf) {
-            printf("🔧 Buffer conflict: frame %d conflicts with queued frame %d (both use buf %d)\n", 
-                   frame, preload_ring[i], buf);
-            return false;
-        }
+        if (preload_ring[i].frame == frame) return false;
     }
 
-    preload_ring[head] = frame;
+    preload_ring[head].frame = frame;
+    preload_ring[head].generation = GSeekGeneration;
     atomic_store(&preload_ring_head, next_head);
     return true;
 }
+
+static void prefetch_frames(int current_frame) {
+    for (int i = 1; i <= PREFETCH_AHEAD; i++) {
+        int next = current_frame + i;
+        if (next >= num_frames) break;
+        schedule_frame_preload(next);
+    }
+}
+
 void seek_to_frame(int new_frame) {
     if (new_frame < 0) new_frame = 0;
     if (new_frame >= num_frames) new_frame = num_frames - 1;
 
     // 1. Pause audio and clear buffers
     atomic_store(&audio_muted, 1);
+
+    GSeekGeneration++;
+    // Clear frame buffers to prevent stale data
     for (int i = 0; i < NUM_BUFFERS; i++) {
         atomic_store(&buf_state[i], BUF_EMPTY);
     }
@@ -361,18 +398,30 @@ void seek_to_frame(int new_frame) {
     long left_offset = audio_offset + ((long)new_frame * bytes_per_frame_per_channel);
     if (left_offset > (audio_offset + left_channel_size))
         left_offset = audio_offset + left_channel_size; // Clamp to max left channel
+    // fseek(audio_fp_left, left_offset, SEEK_SET);
 
-    // Right channel offset
-    long right_offset = audio_offset + left_channel_size + ((long)new_frame * bytes_per_frame_per_channel);
-    if (right_offset > (audio_offset + left_channel_size * 2))
-        right_offset = audio_offset + left_channel_size * 2; // Clamp to max right channel
+    // if (audio_channels == 2){
+    //     // Right channel offset
+    //     long right_offset = audio_offset + left_channel_size + ((long)new_frame * bytes_per_frame_per_channel);
+    //     if (right_offset > (audio_offset + left_channel_size * 2))
+    //         right_offset = audio_offset + left_channel_size * 2; // Clamp to max right channel
+    //     fseek(audio_fp_right, right_offset, SEEK_SET);
+    //     printf("🔊 Seeked to frame %d | left=0x%lX right=0x%lX\n", new_frame, left_offset, right_offset);
+    //  } else {
+    //     printf("🔊 Seeked to frame %d | left=0x%lX (mono)\n", new_frame, left_offset);
+    // }
+    fs_seek(audio_fd_left, left_offset, SEEK_SET);
 
-    // 3. Seek both audio file pointers
-    fseek(audio_fp_left, left_offset, SEEK_SET);
-    fseek(audio_fp_right, right_offset, SEEK_SET);
-
-    printf("🔊 Seeked to frame %d | left=0x%lX right=0x%lX\n", new_frame, left_offset, right_offset);
-
+    if (audio_channels == 2) {
+        // Right channel offset
+        long right_offset = audio_offset + left_channel_size + ((long)new_frame * bytes_per_frame_per_channel);
+        if (right_offset > (audio_offset + left_channel_size * 2))
+            right_offset = audio_offset + left_channel_size * 2; // Clamp to max right channel
+        fs_seek(audio_fd_right, right_offset, SEEK_SET);
+        printf("🔊 Seeked to frame %d | left=0x%lX right=0x%lX\n", new_frame, left_offset, right_offset);
+    } else {
+        printf("🔊 Seeked to frame %d | left=0x%lX (mono)\n", new_frame, left_offset);
+    }
     // 4. Update video state
     atomic_store(&frame_index, new_frame);
     double current_time = psTimer();
@@ -394,6 +443,9 @@ void seek_to_frame(int new_frame) {
         }
     }
 
+    for (int i = 0; i < MIN(NUM_BUFFERS, PREFETCH_AHEAD) && (new_frame + i) < num_frames; i++) {
+        schedule_frame_preload(new_frame + i);
+    }    
     // 7. Resume playback
     atomic_store(&audio_muted, 0);
 }
@@ -428,20 +480,27 @@ static void wait_exit(void) {
 
 void *worker_thread(void *p) {
     while (1) {
-        snd_stream_poll(stream);
+        snd_stream_poll(stream);  // Keep audio flowing
 
         int tail = atomic_load(&preload_ring_tail);
         int head = atomic_load(&preload_ring_head);
 
-        if (tail != head) {  // Ring has work
-            int frame = preload_ring[tail];
+        if (tail != head) {  // There is work in the ring
+            PreloadJob job = preload_ring[tail];
+
+            // Skip stale jobs from previous seek
+            if (job.generation != GSeekGeneration) {
+                atomic_store(&preload_ring_tail, (tail + 1) % RING_CAPACITY);
+                continue;
+            }
+
+            int frame = job.frame;
             int buf = frame % NUM_BUFFERS;
 
-            // Check if this frame is still relevant (not too far behind current playback)
+            // Avoid loading stale frames behind current playback
             int current_frame = atomic_load(&frame_index);
             if (frame < current_frame - NUM_BUFFERS) {
-                // Frame is too old, skip it
-                printf("🗑️ Skipping stale frame %d (current: %d)\n", frame, current_frame);
+                printf("🗑️ Skipping stale frame %d (current=%d)\n", frame, current_frame);
                 atomic_store(&preload_ring_tail, (tail + 1) % RING_CAPACITY);
                 continue;
             }
@@ -455,29 +514,20 @@ void *worker_thread(void *p) {
                     atomic_store(&buf_state[buf], BUF_EMPTY);
                 }
             } else {
-                // Handle buffer conflicts more gracefully
-                int current_state = atomic_load(&buf_state[buf]);
-                if (current_state == BUF_READY) {
-                    // Buffer already has a ready frame, this is likely a duplicate request
-                    printf("🔧 Buffer %d already ready, skipping duplicate frame %d request\n", buf, frame);
-                } else if (current_state == BUF_LOADING) {
-                    // Another thread is already loading this buffer
-                    printf("🔧 Buffer %d already loading, skipping frame %d\n", buf, frame);
-                } else {
-                    // Unexpected state
-                    printf("🔧 Worker: Buffer %d in unexpected state %d for frame %d\n", buf, current_state, frame);
-                }
+                // Handle buffer conflicts
+                int state = atomic_load(&buf_state[buf]);
+                printf("🔧 Worker: buf %d in state %d (frame %d)\n", buf, state, frame);
             }
 
-            // Always advance tail to prevent getting stuck
             atomic_store(&preload_ring_tail, (tail + 1) % RING_CAPACITY);
         }
-        
+
         wait_exit();
-        thd_sleep(1);
+        thd_pass();
     }
     return NULL;
 }
+
 
 
 
@@ -498,33 +548,60 @@ void *worker_thread(void *p) {
         // ZSTD_DCtx_refDDict(dctx, NULL);
         // ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);    
 
-        fp = fopen(VIDEO_FILE, "rb");
-        if (!fp || load_header() < 0) return -1;
+        // fp = fopen(VIDEO_FILE, "rb");
+        // if (!fp || load_header() < 0) return -1;
+        video_fd = fs_open(VIDEO_FILE, O_RDONLY);
+        if (video_fd < 0 || load_header() < 0) return -1;        
         frame_duration = 1.0f / (float)fps;
 
         // Read frame offsets
         frame_offsets = malloc((num_frames + 1) * sizeof(uint32_t));
-        fread(frame_offsets, sizeof(uint32_t), num_frames + 1, fp);
+        // fread(frame_offsets, sizeof(uint32_t), num_frames + 1, fp);
+        fs_read(video_fd, frame_offsets, (num_frames + 1) * sizeof(uint32_t));
 
         // Allocate buffer for compressed frames
         compressed_buffer = memalign(32, max_compressed_size);
         if (!compressed_buffer) return -1;
-        long current_pos = ftell(fp);
-        fseek(fp, 0, SEEK_END);
-        long file_end = ftell(fp);
+
+        // long current_pos = ftell(fp);
+        // fseek(fp, 0, SEEK_END);
+        // long file_end = ftell(fp);
+
+        // // Calculate total audio size
+        // long total_audio_size = file_end - audio_offset;
+        // if (audio_channels == 2) {
+        //     left_channel_size = total_audio_size / 2;
+        // } else {
+        //     left_channel_size = total_audio_size;  // Mono: whole chunk
+        // }
+        // fseek(fp, current_pos, SEEK_SET);
+
+        // Save current position
+        off_t current_pos = fs_tell(video_fd);
+
+        // Seek to end to determine file size
+        fs_seek(video_fd, 0, SEEK_END);
+        off_t file_end = fs_tell(video_fd);
 
         // Calculate total audio size
-        long total_audio_size = file_end - audio_offset;
+        off_t total_audio_size = file_end - audio_offset;
         if (audio_channels == 2) {
             left_channel_size = total_audio_size / 2;
         } else {
             left_channel_size = total_audio_size;  // Mono: whole chunk
         }
-        fseek(fp, current_pos, SEEK_SET);
+
+        // Restore file pointer
+        fs_seek(video_fd, current_pos, SEEK_SET);        
         // int target_frame = (int)(current_time / frame_time) + frame_index;
         // Open the audio file and seek to the audio offset
-        audio_fp_left = fopen(VIDEO_FILE, "rb"); // Point to the same file as video
-        audio_fp_right = fopen(VIDEO_FILE, "rb"); // Point to the same file as video
+        // audio_fp_left = fopen(VIDEO_FILE, "rb"); // Point to the same file as video
+        // if (audio_channels == 2) {        
+        //     audio_fp_right = fopen(VIDEO_FILE, "rb"); // Point to the same file as video
+        // }
+        audio_fd_left = fs_open(VIDEO_FILE, O_RDONLY);
+        if (audio_channels == 2)
+            audio_fd_right = fs_open(VIDEO_FILE, O_RDONLY);        
         // Allocate frame buffer
         for (int i = 0; i < NUM_BUFFERS; i++) {
             frame_buffer[i] = memalign(32, video_frame_size);
@@ -686,49 +763,23 @@ void *worker_thread(void *p) {
                 draw_frame(buf_index, draw_frame_id);
                 atomic_store_explicit(&buf_state[buf_index], BUF_EMPTY, memory_order_release);
 
-                // Reset stall count on successful frame
                 stall_count = 0;
-
-                // Schedule next frames
-                int frames_to_schedule = 3;
-                for (int i = 1; i <= frames_to_schedule; i++) {
-                    int next_frame = draw_frame_id + i;
-                    if (next_frame >= num_frames) break;
-                    
-                    int next_buf = next_frame % NUM_BUFFERS;
-                    if (atomic_load(&buf_state[next_buf]) == BUF_EMPTY) {
-                        if (!schedule_frame_preload(next_frame)) {
-                            break;
-                        }
-                    }
-                }
-
                 atomic_fetch_add(&frame_index, 1);
-                
-            } else {
-                // **IMPROVED STALL HANDLING**
-                stall_count++;
-                
-                // Try to reschedule the current frame if it's empty
-                if (atomic_load(&buf_state[buf_index]) == BUF_EMPTY) {
-                    schedule_frame_preload(draw_frame_id);
+
+                // New: Always prefetch ahead after a successful draw
+                for (int i = 1; i < NUM_BUFFERS; i++) {
+                    int next = draw_frame_id + i;
+                    if (next >= num_frames) break;
+                    schedule_frame_preload(next);
                 }
-                
-                // Only emergency advance after more attempts
-                if (stall_count > 10) {  // Increased threshold
-                    printf("⚠️ Emergency advancing past stalled frame %d (stall_count=%d)\n", 
-                           draw_frame_id, stall_count);
-                    atomic_store_explicit(&buf_state[buf_index], BUF_EMPTY, memory_order_release);
+            } else {
+                stall_count++;
+                if (stall_count > 5) {
+                    printf("⚠️ Emergency advancing past stalled frame %d\n", draw_frame_id);
+                    atomic_store(&buf_state[buf_index], BUF_EMPTY);
                     atomic_fetch_add(&frame_index, 1);
+                    prefetch_frames(draw_frame_id);
                     stall_count = 0;
-                    
-                    // Try to recover by scheduling more frames
-                    for (int i = 0; i < 3; i++) {
-                        int recovery_frame = atomic_load(&frame_index) + i;
-                        if (recovery_frame < num_frames) {
-                            schedule_frame_preload(recovery_frame);
-                        }
-                    }
                 }
             }
         }
@@ -783,18 +834,24 @@ void *worker_thread(void *p) {
     // printf("Final stats - Frames dropped: %d, Max frame time: %.1fms, Avg frame time: %.1fms\n",
     //        frames_dropped, max_frame_time, avg_frame_time);
     atomic_store(&audio_muted, 1);
-        // profiler_stop();
-        // profiler_clean_up();
-        // Clean up
-        thd_join(wthread, NULL);
-        snd_stream_stop(stream);
-        snd_stream_destroy(stream);
-        fclose(fp);
-        fclose(audio_fp_left);
-        fclose(audio_fp_right);
-        // free(frame_buffer);
-        free(compressed_buffer);
-        free(frame_offsets);
+    // profiler_stop();
+    // profiler_clean_up();
+    // Clean up
+    thd_join(wthread, NULL);
+    snd_stream_stop(stream);
+    snd_stream_destroy(stream);
+    // fclose(fp);
+    // fclose(audio_fp_left);
+    // if (audio_channels == 2) {
+    //     fclose(audio_fp_right);
+    // }
+    fs_close(video_fd);
+    fs_close(audio_fd_left);
+    if (audio_channels == 2)
+        fs_close(audio_fd_right);    
+    // free(frame_buffer);
+    free(compressed_buffer);
+    free(frame_offsets);
 
-        return 0;
-    }
+    return 0;
+}

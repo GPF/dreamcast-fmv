@@ -40,7 +40,7 @@ VIDEO_FRAMES="99999" # Default to process all frames
 # VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
 
 # Audio Settings
-AUDIO_RATE=32000
+AUDIO_RATE=44100
 CHANNELS=2
 
 if [ "$USE_STRIDED" = true ]; then

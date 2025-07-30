@@ -12,7 +12,7 @@ rm-elf:
 	-rm -f $(TARGET)
 
 $(TARGET): $(OBJS)
-	kos-cc -o  $(TARGET) $(OBJS) -L$(KOS_BASE)/lib -llz4 #-lzstd -lfastmem 
+	kos-cc -o  $(TARGET) $(OBJS) -L$(KOS_BASE)/lib -llz4 -lfastmem #-lzstd  
 
 run: $(TARGET)
 	$(KOS_LOADER) $(TARGET)
