@@ -1,18 +1,22 @@
 /*
- * pack_dcmv_v5.c
+ * pack_dcmv_v6.c
  * ---------------------
- * Dreamcast movie packer utility for the custom .dcmv v5 format.
+ * Dreamcast movie packer utility for the custom .dcmv v6 format.
  *
- * Changes from v4:
+ * Changes from v5:
+ *   - Adds compression type byte (0 = LZ4, 1 = Zstandard)
+ *   - Enables Zstd compression via command-line argument
+ *
+ * Retained from v5:
  *   - Supports deduplicated frames
  *   - Reads frame_durations.txt to determine frame repeat counts
  *   - Stores both total and unique frame counts in the header
  *   - Writes an additional frame_durations[] table after frame_offsets[]
  *
- * Header format (49 bytes total):
+ * Header format (50 bytes total):
  *   4 bytes  - Magic "DCMV"
- *   4 bytes  - Version (5)
- *   1 byte   - Frame type (0=RGB565, 1=YUV422)
+ *   4 bytes  - Version (6)
+ *   1 byte   - Frame type (0 = RGB565, 1 = YUV422)
  *   2 bytes  - Texture width
  *   2 bytes  - Texture height
  *   2 bytes  - Content width
@@ -23,27 +27,31 @@
  *   4 bytes  - Number of unique frames
  *   4 bytes  - Number of total frames (including duplicates)
  *   4 bytes  - Uncompressed frame size
- *   4 bytes  - Maximum compressed frame size (LZ4)
- *   4 bytes  - Audio stream offset
+ *   4 bytes  - Maximum compressed frame size (for LZ4 or Zstd)
+ *   4 bytes  - Audio stream offset (absolute file position)
+ *   1 byte   - Compression type (0 = LZ4, 1 = Zstandard)
+ *
  *   Offset Table:
  *     (num_unique_frames + 1) uint32_t values
  *   Duration Table:
  *     num_unique_frames uint16_t values (frame durations)
  *
  * Usage:
- *   pack_dcmv_v5 <output.dcmv> <frame_type> <width> <height>
+ *   pack_dcmv_v6 <output.dcmv> <frame_type> <width> <height>
  *                <scale_width> <scale_height> <fps>
  *                <sample_rate> <channels>
- *                <frame_pattern> <audio_file> <frame_durations.txt>
+ *                <frame_pattern> <audio_file> <frame_durations.txt> <compression>
  *
  * Example:
- *   ./pack_dcmv_v5 movie.dcmv 1 320 240 320 240 23.97
- *                  32000 2 output/frame%05d.dt audio.dca output/unique_frames/frame_durations.txt
+ *   ./pack_dcmv_v6 movie.dcmv 1 320 240 320 240 23.97 \
+ *                  32000 2 output/frame%05d.dt audio.dca \
+ *                  output/unique_frames/frame_durations.txt zstd
  *
  * Author: Troy Davis (gpf)
  * GitHub: https://github.com/GPF
  * License: Public Domain / MIT-style — use freely with attribution.
  */
+
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,10 +60,12 @@
 #include <errno.h>
 #include <lz4.h>
 #include <lz4hc.h>
+#define ZSTD_STATIC_LINKING_ONLY
+#include <zstd.h>
 
 #define MAX_FRAMES 99999
 #define FRAME_FILENAME_MAX 256
-#define HEADER_SIZE 49
+#define HEADER_SIZE 50 
 #define DT_HEADER_MAGIC "DcTx"
 
 static uint16_t *durations = NULL;
@@ -66,9 +76,11 @@ void write_header(FILE *out, uint8_t frame_type, uint16_t width, uint16_t height
                   uint16_t scale_width, uint16_t scale_height, float fps,
                   uint16_t sample_rate, uint16_t channels,
                   uint32_t num_unique_frames, uint32_t num_total_frames,
-                  uint32_t frame_size, uint32_t max_compressed_size, uint32_t audio_offset) {
+                  uint32_t frame_size, uint32_t max_compressed_size,
+                  uint32_t audio_offset, uint8_t compression_type)
+{
     fwrite("DCMV", 1, 4, out);
-    uint32_t version = 5;
+    uint32_t version = 6;
     fwrite(&version, 4, 1, out);
     fwrite(&frame_type, 1, 1, out);
     fwrite(&width, 2, 1, out);
@@ -83,6 +95,7 @@ void write_header(FILE *out, uint8_t frame_type, uint16_t width, uint16_t height
     fwrite(&frame_size, 4, 1, out);
     fwrite(&max_compressed_size, 4, 1, out);
     fwrite(&audio_offset, 4, 1, out);
+    fwrite(&compression_type, 1, 1, out);  // NEW BYTE
 }
 
 static const char* get_frame_type_name(uint8_t frame_type) {
@@ -186,11 +199,11 @@ int load_durations(const char *path) {
 }
 
 int main(int argc, char **argv) {
-    if (argc != 13) {
+    if (argc != 14) {
         printf("Usage: %s <output.dcmv> <frame_type> <width> <height> "
                "<scale_width> <scale_height> <fps> "
                "<sample_rate> <channels> "
-               "<frame_pattern> <audio_file> <frame_durations.txt>\n", argv[0]);
+               "<frame_pattern> <audio_file> <frame_durations.txt> <compression>\n", argv[0]);
         return 1;
     }
 
@@ -206,12 +219,14 @@ int main(int argc, char **argv) {
     const char *frame_pattern = argv[10];
     const char *audio_path = argv[11];
     const char *durations_path = argv[12];
+    const char *compression = argv[13];
+    int use_zstd = (strcmp(compression, "zstd") == 0);
 
     if (load_durations(durations_path) != 0) {
         return 1;
     }
 
-    printf("📦 DCMV Packer v5 (Deduplicated Frames)\n");
+    printf("📦 DCMV Packer v6 (Deduplicated Frames)\n");
     printf("   Format: %s (%d)\n", get_frame_type_name(frame_type), frame_type);
     printf("   Texture: %dx%d, Content: %dx%d\n", width, height, scale_width, scale_height);
     printf("   FPS: %.2f, Audio: %dHz, %d channel(s)\n", fps, sample_rate, channels);
@@ -265,9 +280,44 @@ int main(int argc, char **argv) {
 
     // Compress frames
     uint8_t *frame_buf = malloc(frame_size);
-    uint8_t *compressed_buf = malloc(LZ4_compressBound(frame_size));
+    if (!frame_buf) {
+        fprintf(stderr, "Memory allocation failed for frame_buf\n");
+        return 1;
+    }
+
+    uint8_t *compressed_buf = NULL;
+    ZSTD_CCtx *cctx = NULL;
+
+    if (use_zstd) {
+        cctx = ZSTD_createCCtx();
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_format, ZSTD_f_zstd1_magicless);
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 22);
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 17);  // Reduce memory
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, 0);
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 0);
+
+        size_t bound = ZSTD_compressBound(frame_size);
+        compressed_buf = malloc(bound);
+        if (!compressed_buf) {
+            fprintf(stderr, "Memory allocation failed for compressed_buf (Zstd)\n");
+            return 1;
+        }
+    } else {
+        compressed_buf = malloc(LZ4_compressBound(frame_size));
+        if (!compressed_buf) {
+            fprintf(stderr, "Memory allocation failed for compressed_buf (LZ4)\n");
+            return 1;
+        }
+    }
     uint32_t max_compressed_size = 0;
     printf("🗜️  Compressing unique frames...\n");
+    size_t zstd_bound = 0;
+    if (use_zstd) {
+        zstd_bound = ZSTD_compressBound(frame_size);
+    }
+    ZSTD_inBuffer input;
+    ZSTD_outBuffer output;
+    int comp_size = 0;
     for (uint32_t i = 0; i < num_unique_frames; i++) {
         snprintf(filename, sizeof(filename), frame_pattern, i);
         size_t read_size = load_frame_data(filename, frame_buf, frame_size);
@@ -275,12 +325,42 @@ int main(int argc, char **argv) {
             fprintf(stderr, "Frame %u load error\n", i);
             return 1;
         }
-        int compressed_size = LZ4_compress_HC((char*)frame_buf, (char*)compressed_buf, frame_size, LZ4_compressBound(frame_size), LZ4HC_CLEVEL_MAX);
-        fwrite(compressed_buf, 1, compressed_size, out);
-        if (compressed_size > max_compressed_size) max_compressed_size = compressed_size;
+        if (use_zstd) {
+            // Zstandard compression path
+            ZSTD_CCtx_reset(cctx, ZSTD_reset_session_only);
+            input.src = frame_buf;
+            input.size = frame_size;
+            input.pos = 0;
+
+            output.dst = compressed_buf;
+            output.size = zstd_bound;
+            output.pos = 0;
+
+            size_t res = ZSTD_compressStream2(cctx, &output, &input, ZSTD_e_end);
+            if (ZSTD_isError(res)) {
+                fprintf(stderr, "ZSTD compress error on frame %u: %s\n", i, ZSTD_getErrorName(res));
+                return 1;
+            }
+
+            fwrite(compressed_buf, 1, output.pos, out);
+            if (output.pos > max_compressed_size)
+                max_compressed_size = output.pos;
+
+        } else {
+            // LZ4 compression path
+            int comp_size = LZ4_compress_HC((const char *)frame_buf, (char *)compressed_buf,
+                                 frame_size, LZ4_compressBound(frame_size), 12);
+            if (comp_size <= 0) {
+                fprintf(stderr, "LZ4 compression failed on frame %d\n", i);
+                return 1;
+            }
+
+            fwrite(compressed_buf, 1, comp_size, out);
+            if (comp_size > max_compressed_size) max_compressed_size = comp_size;
+        }
         if (i < num_unique_frames - 1) offsets[i + 1] = ftell(out);
         if ((i + 1) % 100 == 0 || i == num_unique_frames - 1) {
-            printf("Frame %u compressed: %d bytes\n", i, compressed_size);
+            // printf("\r  Frame %u compressed: %zu bytes", i, use_zstd ? output.pos : (size_t)comp_size);
             printf("\r   Processed %u/%u frames (%.1f%%)", i + 1, num_unique_frames, (float)(i + 1) / num_unique_frames * 100.0f);
             fflush(stdout);
         }
@@ -304,9 +384,10 @@ int main(int argc, char **argv) {
 
     // Write header
     fseek(out, 0, SEEK_SET);
+    uint8_t compression_type = use_zstd ? 1 : 0;
     write_header(out, frame_type, width, height, scale_width, scale_height, fps,
-                 sample_rate, channels, num_unique_frames, num_total_frames,
-                 frame_size, max_compressed_size, audio_offset);
+             sample_rate, channels, num_unique_frames, num_total_frames,
+             frame_size, max_compressed_size, audio_offset, compression_type);
 
     // Write offset table
     fseek(out, offset_table_pos, SEEK_SET);
@@ -322,6 +403,6 @@ int main(int argc, char **argv) {
     free(compressed_buf);
     fclose(out);
 
-    printf("✅ DCMV v5 file created successfully: %s\n", output_path);
+    printf("✅ DCMV v6 file created successfully: %s\n", output_path);
     return 0;
 }

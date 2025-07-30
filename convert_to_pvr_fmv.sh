@@ -44,6 +44,8 @@ VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused fr
 AUDIO_RATE=22150
 CHANNELS=1
 
+COMPRESSION_BACKEND="zstd" # Options: lz4, zstd
+
 if [ "$USE_STRIDED" = true ]; then
     WIDTH=640 # Direct strided texture
     HEIGHT=480
@@ -270,7 +272,7 @@ fi
 
 echo "📦 Packing into compressed .dcmv format..."
 "$PACKER" "$FINAL_OUTPUT" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$SCALE_WIDTH" "$SCALE_HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
-  "$OUTPUT_DIR/frame%05d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" || exit 1
+  "$OUTPUT_DIR/frame%05d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" || exit 1
 
 
 # Clean up intermediate files

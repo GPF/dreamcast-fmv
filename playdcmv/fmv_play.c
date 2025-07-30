@@ -1,8 +1,8 @@
 /**
- * fmv_play_v5.c - Dreamcast FMV Player (DCMV v5)
+ * fmv_play_v6.c - Dreamcast FMV Player (DCMV v6)
  * -----------------------------------------------------
  * Supports:
- *  - DCMV v5 header (unique + total frames)
+ *  - DCMV v6 header (unique + total frames)
  *  - Frame duration table for deduplicated frames
  *  - Mapping total frame indices to unique frames
  *  - All original sync, audio, controller, and rendering logic
@@ -26,6 +26,9 @@
 #define LZ4_memset(d,s,n) memset_fast((d),(s),(n))
 #define LZ4_FREESTANDING 1
 #include <lz4/lz4.h>
+#define ZSTD_STATIC_LINKING_ONLY
+#include <zstd/zstd.h>
+static ZSTD_DCtx *dctx = NULL;
 
 #define DCMV_MAGIC "DCMV"
 #define VIDEO_FILE "/pc/movie.dcmv"
@@ -53,7 +56,7 @@ static double frame_duration = 1.0f / 30.0f;
 static _Atomic double audio_start_time_ms = 0.0;
 static atomic_int seek_request = -1;
 static double frame_start_time = 0.0;
-
+int use_zstd = 0;
 pvr_ptr_t pvr_txr;
 pvr_poly_hdr_t hdr;
 pvr_vertex_t vert[4];
@@ -112,14 +115,26 @@ static int load_frame(int unique_frame, int buf_index) {
     fs_seek(video_fd, offset, SEEK_SET);
     fs_read(video_fd, compressed_buffer, compressed_size);
 
-    int res = LZ4_decompress_fast(
-        (const char *)compressed_buffer,
-        (char *)frame_buffer[buf_index],
-        video_frame_size);
+    if(use_zstd == 1) {
+        size_t res = ZSTD_decompressDCtx(dctx,
+                                        frame_buffer[buf_index],
+                                        video_frame_size,
+                                        compressed_buffer,
+                                        compressed_size);
+        if (ZSTD_isError(res)) {
+            printf("❌ ZSTD decompress error on frame %d: %s\n", unique_frame, ZSTD_getErrorName(res));
+            return -1;
+        }
+    } else {
+        int res = LZ4_decompress_fast(
+            (const char *)compressed_buffer,
+            (char *)frame_buffer[buf_index],
+            video_frame_size);
 
-    if (res < 0) {
-        printf("❌ LZ4 decompression failed on unique frame %d\n", unique_frame);
-        return -1;
+        if (res < 0) {
+            printf("❌ LZ4 decompression failed on unique frame %d\n", unique_frame);
+            return -1;
+        }
     }
     return 0;
 }
@@ -150,8 +165,8 @@ static int load_header(void) {
 
     uint32_t version;
     fs_read(video_fd, &version, 4);
-    if (version != 5) {
-        printf("❌ Unsupported DCMV version: %d (expected 5)\n", version);
+    if (version != 6) {
+        printf("❌ Unsupported DCMV version: %d (expected 6)\n", version);
         return -1;
     }
 
@@ -171,12 +186,27 @@ static int load_header(void) {
     fs_read(video_fd, &max_compressed_size, 4);
     fs_read(video_fd, &audio_offset, 4);
 
-    printf("📦 Header v5: %s %dx%d (content: %dx%d) @ %.2ffps, %dHz, %dch, unique=%d, total=%d, frame_size=%d, max_compressed_size=%d, audio_offset=0x%X\n",
+    uint8_t compression_type = 0;  // default to LZ4
+    fs_read(video_fd, &compression_type, 1);
+
+    // interpret compression_type
+    const char *compression_str = "LZ4";
+    if (compression_type == 1) {
+        compression_str = "Zstandard";
+    }
+
+    printf("📦 Header v%d: %s %dx%d (content: %dx%d) @ %.2ffps, %dHz, %dch, unique=%d, total=%d\n",
+        version,
         frame_type == 1 ? "YUV422" : "RGB565",
         video_width, video_height, content_width, content_height,
         fps, sample_rate, audio_channels,
-        num_unique_frames, num_total_frames,
-        video_frame_size, max_compressed_size, audio_offset);
+        num_unique_frames, num_total_frames);
+
+    printf("   Frame size: %d, Max compressed: %d, Audio offset: 0x%X, Compression: %s\n",
+        video_frame_size, max_compressed_size, audio_offset, compression_str);
+
+    // store this for later decompression choice
+    use_zstd = (compression_type == 1);  // <-- declare this global or static as needed
 
     return 0;
 }
@@ -367,12 +397,23 @@ void *worker_thread(void *p) {
 int main(int argc, char **argv) {
     atomic_store(&frame_index, 0);
     int current_frame = atomic_load(&frame_index);
-    
+
     video_fd = fs_open(VIDEO_FILE, O_RDONLY);
     if (video_fd < 0 || load_header() < 0) return -1;
 
+    if(use_zstd == 1) {
+        dctx = ZSTD_createDCtx();
+        ZSTD_DCtx_setParameter(dctx, ZSTD_d_format, ZSTD_f_zstd1_magicless);
+        ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 17);
+        ZSTD_DCtx_setParameter(dctx, ZSTD_d_forceIgnoreChecksum, 1);
+        ZSTD_DCtx_setParameter(dctx, ZSTD_d_refMultipleDDicts, ZSTD_rmd_refSingleDDict);
+        ZSTD_DCtx_setParameter(dctx, ZSTD_d_maxBlockSize, 131072);
+        ZSTD_DCtx_refDDict(dctx, NULL);
+        ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);     
+    }
+        
     // Read frame offsets + durations for deduplicated format
-    fs_seek(video_fd, 49, SEEK_SET);
+    fs_seek(video_fd, 50, SEEK_SET);
     frame_offsets = malloc((num_unique_frames + 1) * sizeof(uint32_t));
     fs_read(video_fd, frame_offsets, (num_unique_frames + 1) * sizeof(uint32_t));
     frame_durations = malloc(num_unique_frames * sizeof(uint16_t));
