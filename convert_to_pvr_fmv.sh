@@ -19,9 +19,10 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-INPUT="input/dolby-atmos-trailer_amaze_1080.mp4"
-# INPUT="input/lair.ogv" # Example for other video
+# INPUT="input/dolby-atmos-trailer_amaze_1080.mp4"
+INPUT="input/lair.ogv" # Example for other video
 OUTPUT_DIR="output"
+UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
 TEMP_DIR="temp_frames"
 FINAL_OUTPUT="./playdcmv/movie.dcmv"
 
@@ -36,12 +37,12 @@ SCALE_HEIGHT=480
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
-VIDEO_FRAMES="99999" # Default to process all frames
-# VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
+# VIDEO_FRAMES="99999" # Default to process all frames
+VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
 
 # Audio Settings
-AUDIO_RATE=44100
-CHANNELS=2
+AUDIO_RATE=22150
+CHANNELS=1
 
 if [ "$USE_STRIDED" = true ]; then
     WIDTH=640 # Direct strided texture
@@ -75,8 +76,8 @@ PAD_X=$(( (WIDTH - SCALE_WIDTH) / 2 ))
 PAD_Y=$(( (HEIGHT - SCALE_HEIGHT) / 2 ))
 
 # Setup directories
-mkdir -p "$OUTPUT_DIR" "$TEMP_DIR"
-echo "📂 Created directories: $OUTPUT_DIR, $TEMP_DIR"
+mkdir -p "$OUTPUT_DIR" "$TEMP_DIR" "$UNIQUE_FRAMES"
+echo "📂 Created directories: $OUTPUT_DIR, $TEMP_DIR, $UNIQUE_FRAMES"
 
 if [ "$USE_STRIDED" = true ]; then
     echo "📐 Using STRIDED texture mode: ${WIDTH}x${HEIGHT} (no padding)"
@@ -143,39 +144,46 @@ build_ffmpeg_opts() {
 
 process_rgb565() {
     EXT="dt"
-    FRAME_TYPE=0 # Corresponds to RGB565 in your packer
-    echo "📁 Checking for existing $EXT frames..."
-
-    if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$OUTPUT_DIR/frame*.${EXT}" >/dev/null; then
-        echo "✅ Found preconverted .${EXT} frames, skipping frame extraction and conversion."
-        return 0
-    fi
+    FRAME_TYPE=0 # RGB565
 
     # Build FFmpeg options
     build_ffmpeg_opts
 
-    # Extract frames as high-precision PNGs
-    echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
-    ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
-
-    # Convert frames to VQ-compressed format using pvrtex
-    echo "🎞️ Converting frames to VQ-compressed ${EXT} (RGB565)..."
-
-    local pvrtx_opts=(-f RGB565 -c) # Base pvrtex options for RGB565 VQ
-    if [ "$USE_STRIDED" = true ]; then
-        pvrtx_opts+=(-s) # Add strided flag
+    # Extract frames if not already extracted
+    if ! compgen -G "$TEMP_DIR/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
+        echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
+        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
+    else
+        echo "✅ Found extracted frames in $TEMP_DIR, skipping ffmpeg extraction."
     fi
-    if [ "$PVRTX_DITHER" -eq 1 ]; then
-        pvrtx_opts+=(--dither) # Add dithering flag for pvrtex
+
+    # Deduplicate frames regardless of .dt files
+    if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$UNIQUE_FRAMES/frame*.${INTERMEDIATE_FORMAT}" >/dev/null; then
+        echo "✅ Found unique frames, skipping deduplication."
+    else
+        echo "🔍 Running frame deduplication..."
+        rm -rf "$UNIQUE_FRAMES"
+        python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" 0.5 || exit 1
     fi
+
+    # Convert unique frames if no .dt files exist
+    if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$OUTPUT_DIR/frame*.${EXT}" >/dev/null; then
+        echo "✅ Found preconverted .${EXT} frames, skipping pvrtex conversion."
+        return 0
+    fi
+
+    echo "🎞️ Converting unique frames to VQ-compressed ${EXT} (RGB565)..."
+    local pvrtx_opts=(-f RGB565 -c)
+    [ "$USE_STRIDED" = true ] && pvrtx_opts+=(-s)
+    [ "$PVRTX_DITHER" -eq 1 ] && pvrtx_opts+=(--dither)
 
     if command -v parallel >/dev/null; then
-        find "$TEMP_DIR" -name "frame*.$INTERMEDIATE_FORMAT" -print0 | \
+        find "$UNIQUE_FRAMES" -name "frame*.$INTERMEDIATE_FORMAT" -print0 | \
             parallel -0 -j "$THREADS" --bar \
             "$PVRTX -i {} -o $OUTPUT_DIR/{/.}.$EXT ${pvrtx_opts[*]} $PVRTX_QUIET"
     else
         local frame_idx=0
-        for intermediate_file in "$TEMP_DIR"/frame*.$INTERMEDIATE_FORMAT; do
+        for intermediate_file in "$UNIQUE_FRAMES"/frame*.$INTERMEDIATE_FORMAT; do
             local base=$(printf "frame%05d" "$frame_idx")
             $PVRTX -i "$intermediate_file" -o "$OUTPUT_DIR/${base}.${EXT}" "${pvrtx_opts[@]}" $PVRTX_QUIET || exit 1
             ((frame_idx++))
@@ -185,45 +193,53 @@ process_rgb565() {
 
 process_yuv422() {
     EXT="dt"
-    FRAME_TYPE=1 # Corresponds to YUV422 in your packer
-    echo "📁 Checking for existing $EXT frames..."
-
-    if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$OUTPUT_DIR/frame*.${EXT}" >/dev/null; then
-        echo "✅ Found preconverted .${EXT} frames, skipping frame extraction and conversion."
-        return 0
-    fi
+    FRAME_TYPE=1 # YUV422
 
     # Build FFmpeg options
     build_ffmpeg_opts
 
-    # Extract frames as high-precision PNGs
-    echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
-    ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
-
-    # Convert frames to VQ-compressed format with YUV using pvrtex
-    echo "🎞️ Converting frames to VQ-compressed ${EXT} (YUV422)..."
-
-    local pvrtx_opts=(-f YUV -c) # Base pvrtex options for YUV VQ
-    if [ "$USE_STRIDED" = true ]; then
-        pvrtx_opts+=(-s) # Add strided flag
+    # Extract frames if temp_frames is empty
+    if ! compgen -G "$TEMP_DIR/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
+        echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
+        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
+    else
+        echo "✅ Found extracted frames in $TEMP_DIR, skipping ffmpeg extraction."
     fi
-    if [ "$PVRTX_DITHER" -eq 1 ]; then
-        pvrtx_opts+=(--dither) # Add dithering flag for pvrtex (if applicable for YUV)
+
+    # Deduplicate frames
+    if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$UNIQUE_FRAMES/frame*.${INTERMEDIATE_FORMAT}" >/dev/null; then
+        echo "✅ Found unique frames, skipping deduplication."
+    else
+        echo "🔍 Running frame deduplication..."
+        rm -rf "$UNIQUE_FRAMES"
+        python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" 0.5 || exit 1
     fi
+
+    # Convert unique frames to VQ-compressed format
+    if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$OUTPUT_DIR/frame*.${EXT}" >/dev/null; then
+        echo "✅ Found preconverted .${EXT} frames, skipping pvrtex conversion."
+        return 0
+    fi
+
+    echo "🎞️ Converting unique frames to VQ-compressed ${EXT} (YUV422)..."
+    local pvrtx_opts=(-f YUV -c)
+    [ "$USE_STRIDED" = true ] && pvrtx_opts+=(-s)
+    [ "$PVRTX_DITHER" -eq 1 ] && pvrtx_opts+=(--dither)
 
     if command -v parallel >/dev/null; then
-        find "$TEMP_DIR" -name 'frame*.png' -print0 | \
+        find "$UNIQUE_FRAMES" -name "frame*.$INTERMEDIATE_FORMAT" -print0 | \
             parallel -0 -j "$THREADS" --bar \
             "$PVRTX -i {} -o $OUTPUT_DIR/{/.}.$EXT ${pvrtx_opts[*]} $PVRTX_QUIET"
     else
         local frame_idx=0
-        for png in "$TEMP_DIR"/frame*.png; do
+        for intermediate_file in "$UNIQUE_FRAMES"/frame*.$INTERMEDIATE_FORMAT; do
             local base=$(printf "frame%05d" "$frame_idx")
-            $PVRTX -i "$png" -o "$OUTPUT_DIR/${base}.${EXT}" "${pvrtx_opts[@]}" $PVRTX_QUIET || exit 1
+            $PVRTX -i "$intermediate_file" -o "$OUTPUT_DIR/${base}.${EXT}" "${pvrtx_opts[@]}" $PVRTX_QUIET || exit 1
             ((frame_idx++))
         done
     fi
 }
+
 
 # Main processing
 case "$FORMAT" in
@@ -252,10 +268,10 @@ else
       -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
 fi
 
-# Pack video frames + audio into compressed .dcmv format
 echo "📦 Packing into compressed .dcmv format..."
 "$PACKER" "$FINAL_OUTPUT" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$SCALE_WIDTH" "$SCALE_HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
-  "$OUTPUT_DIR/frame%05d.${EXT}" "$AUDIO_OUT" || exit 1
+  "$OUTPUT_DIR/frame%05d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" || exit 1
+
 
 # Clean up intermediate files
 if [ "$CLEANUP_TEMP" = true ]; then
