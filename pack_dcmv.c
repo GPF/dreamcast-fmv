@@ -287,15 +287,31 @@ int main(int argc, char **argv) {
 
     uint8_t *compressed_buf = NULL;
     ZSTD_CCtx *cctx = NULL;
+    // ZSTD_CDict *cdict = NULL;
 
     if (use_zstd) {
         cctx = ZSTD_createCCtx();
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_format, ZSTD_f_zstd1_magicless);
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 22);
-        ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 17);  // Reduce memory
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 14);  // Reduce memory
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, 0);
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 0);
 
+        // // 🔽 Add dictionary load here
+        // FILE *dict_file = fopen("./playdcmv/fmv_dict", "rb");
+        // if (!dict_file) {
+        //     fprintf(stderr, "❌ Failed to open fmv_dict\n");
+        //     return 1;
+        // }
+        // fseek(dict_file, 0, SEEK_END);
+        // size_t dict_size = ftell(dict_file);
+        // fseek(dict_file, 0, SEEK_SET);
+        // void *dict_buf = malloc(dict_size);
+        // fread(dict_buf, 1, dict_size, dict_file);
+        // fclose(dict_file);
+        // printf("📚 Using dictionary from ./playdcmv/fmv_dict (%zu bytes)\n", dict_size);
+        // cdict = ZSTD_createCDict(dict_buf, dict_size, 22); 
+        // ZSTD_CCtx_refCDict(cctx, cdict);        
         size_t bound = ZSTD_compressBound(frame_size);
         compressed_buf = malloc(bound);
         if (!compressed_buf) {

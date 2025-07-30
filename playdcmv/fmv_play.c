@@ -29,6 +29,9 @@
 #define ZSTD_STATIC_LINKING_ONLY
 #include <zstd/zstd.h>
 static ZSTD_DCtx *dctx = NULL;
+// ZSTD_DDict *ddict = NULL;
+// void *dict_buf = NULL;
+// size_t dict_size = 0;
 
 #define DCMV_MAGIC "DCMV"
 #define VIDEO_FILE "/pc/movie.dcmv"
@@ -62,6 +65,7 @@ pvr_poly_hdr_t hdr;
 pvr_vertex_t vert[4];
 char screenshotfilename[256];
 
+
 #define VIDEO_START_FRAME 0
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
@@ -86,7 +90,8 @@ static atomic_int preload_ring_tail = 0;
 #define INITIAL_PRELOAD 3
 
 _Atomic int buf_state[NUM_BUFFERS] = { BUF_EMPTY };
-
+static atomic_int buf_ref_count[NUM_BUFFERS] = { 0 };  // Reference count per buffer
+static int last_unique_frame_drawn = -1;  // Track last unique frame we actually drew
 static volatile int audio_started = 0;
 int soundbufferalloc = 4096;
 static volatile float current_audio_frame = 0;
@@ -273,6 +278,8 @@ bool schedule_frame_preload(int frame) {
     if (frame >= num_total_frames) return false;
     int unique_frame = total_to_unique_frame(frame);
     int buf = unique_frame % NUM_BUFFERS;
+    
+    // Don't schedule if buffer is not empty
     if (atomic_load(&buf_state[buf]) != BUF_EMPTY) return false;
 
     int head = atomic_load(&preload_ring_head);
@@ -280,8 +287,10 @@ bool schedule_frame_preload(int frame) {
     int next_head = (head + 1) % RING_CAPACITY;
     if (next_head == tail) return false;
 
+    // Check if this UNIQUE frame is already queued (not just total frame)
     for (int i = tail; i != head; i = (i + 1) % RING_CAPACITY) {
-        if (preload_ring[i].frame == frame) return false;
+        int queued_unique = total_to_unique_frame(preload_ring[i].frame);
+        if (queued_unique == unique_frame) return false;  // Already queued
     }
 
     preload_ring[head].frame = frame;
@@ -304,9 +313,12 @@ void seek_to_frame(int new_frame) {
 
     atomic_store(&audio_muted, 1);
     GSeekGeneration++;
+    last_unique_frame_drawn = -1;  // Reset unique frame tracking
 
-    for (int i = 0; i < NUM_BUFFERS; i++)
+    for (int i = 0; i < NUM_BUFFERS; i++) {
         atomic_store(&buf_state[i], BUF_EMPTY);
+        atomic_store(&buf_ref_count[i], 0);  // Reset reference counts
+    }
 
     atomic_store(&preload_ring_head, 0);
     atomic_store(&preload_ring_tail, 0);
@@ -333,8 +345,21 @@ void seek_to_frame(int new_frame) {
     double new_audio_time = (double)(new_frame * samples_per_frame) * 1000.0 / sample_rate;
     atomic_store(&audio_start_time_ms, new_audio_time);
 
-    for (int i = 0; i < MIN(NUM_BUFFERS, 4) && (new_frame + i) < num_total_frames; i++)
-        schedule_frame_preload(new_frame + i);
+    // Schedule initial preloads more intelligently
+    int preloads_scheduled = 0;
+    for (int i = 0; i < num_total_frames && preloads_scheduled < MIN(NUM_BUFFERS/2, 8); i++) {
+        int target_frame = new_frame + i;
+        if (target_frame >= num_total_frames) break;
+        
+        int target_unique = total_to_unique_frame(target_frame);
+        int target_buf = target_unique % NUM_BUFFERS;
+        
+        if (atomic_load(&buf_state[target_buf]) == BUF_EMPTY) {
+            if (schedule_frame_preload(target_frame)) {
+                preloads_scheduled++;
+            }
+        }
+    }
 
     atomic_store(&audio_muted, 0);
 }
@@ -394,6 +419,20 @@ void *worker_thread(void *p) {
     return NULL;
 }
 
+void debug_buffer_state(int current_frame) {
+    printf("Frame %d status: ", current_frame);
+    for (int i = 0; i < 8; i++) {  // Show first 8 buffers
+        int total_f = current_frame + i;
+        if (total_f >= num_total_frames) break;
+        int unique_f = total_to_unique_frame(total_f);
+        int buf = unique_f % NUM_BUFFERS;
+        int state = atomic_load(&buf_state[buf]);
+        printf("T%d(U%d,B%d)=%s ", total_f, unique_f, buf, 
+               state == BUF_EMPTY ? "E" : state == BUF_LOADING ? "L" : "R");
+    }
+    printf("\n");
+}
+
 int main(int argc, char **argv) {
     atomic_store(&frame_index, 0);
     int current_frame = atomic_load(&frame_index);
@@ -401,15 +440,39 @@ int main(int argc, char **argv) {
     video_fd = fs_open(VIDEO_FILE, O_RDONLY);
     if (video_fd < 0 || load_header() < 0) return -1;
 
-    if(use_zstd == 1) {
+    if (use_zstd == 1) {
+        // FILE *dict_file = fopen("/pc/fmv_dict", "rb");
+        // if (!dict_file) {
+        //     printf("❌ Failed to open /pc/fmv_dict\n");
+        //     return -1;
+        // }
+        // fseek(dict_file, 0, SEEK_END);
+        // dict_size = ftell(dict_file);
+        // fseek(dict_file, 0, SEEK_SET);
+        // dict_buf = malloc(dict_size);
+        // fread(dict_buf, 1, dict_size, dict_file);
+        // fclose(dict_file);
+
+        // ddict = ZSTD_createDDict_advanced(
+        //     dict_buf, dict_size,
+        //     ZSTD_dlm_byRef,
+        //     ZSTD_dct_auto,
+        //     ZSTD_defaultCMem
+        // );
+        // if (!ddict) {
+        //     printf("❌ Failed to create DDict\n");
+        //     return -1;
+        // }
+
         dctx = ZSTD_createDCtx();
         ZSTD_DCtx_setParameter(dctx, ZSTD_d_format, ZSTD_f_zstd1_magicless);
-        ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 17);
+        ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 14);
         ZSTD_DCtx_setParameter(dctx, ZSTD_d_forceIgnoreChecksum, 1);
         ZSTD_DCtx_setParameter(dctx, ZSTD_d_refMultipleDDicts, ZSTD_rmd_refSingleDDict);
         ZSTD_DCtx_setParameter(dctx, ZSTD_d_maxBlockSize, 131072);
+        // ZSTD_DCtx_refDDict(dctx, ddict);
         ZSTD_DCtx_refDDict(dctx, NULL);
-        ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);     
+        ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);
     }
         
     // Read frame offsets + durations for deduplicated format
@@ -463,14 +526,34 @@ int main(int argc, char **argv) {
     atomic_store(&audio_muted, 1);
     snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
     
-    // ✅ Start worker before pushing preload jobs
+    // ✅ Start worker thread
     wthread = thd_create(0, worker_thread, NULL);
 
-    // 🔁 Let worker run at least a frame
-    thd_sleep(30);  // Allow ~30ms for worker to dequeue from ring
+    // ✅ CRITICAL: Load initial frames SYNCHRONOUSLY before starting playback
+    printf("🔄 Loading initial frames synchronously...\n");
     atomic_store(&seek_request, current_frame);
+    // Load first few unique frames directly (not through worker thread)
+    for (int i = 0; i < MIN(NUM_BUFFERS, 8); i++) {
+        if (i >= num_unique_frames) break;
+        
+        int buf_index = i % NUM_BUFFERS;
+        atomic_store(&buf_state[buf_index], BUF_LOADING);
+        
+        if (load_frame(i, buf_index) == 0) {
+            atomic_store(&buf_state[buf_index], BUF_READY);
+            printf("✅ Preloaded unique frame %d into buffer %d\n", i, buf_index);
+        } else {
+            atomic_store(&buf_state[buf_index], BUF_EMPTY);
+            printf("❌ Failed to preload unique frame %d\n", i);
+        }
+    }
 
-    printf("✅ All initial frames ready. Starting at frame %d\n", current_frame);
+    current_frame = atomic_load(&frame_index);
+    frame_start_time = psTimer();
+    atomic_store(&audio_start_time_ms, 0.0);
+    
+
+    printf("✅ Initial frames loaded. Starting playback at frame %d\n", current_frame);
 
     double accumulated_frame_debt = 0.0;
     int frames_dropped = 0;
@@ -478,7 +561,8 @@ int main(int argc, char **argv) {
     double avg_frame_time = 0.0;
     double frame_time_samples = 0.0;
     int stall_count = 0;
-
+    static int unique_display_count = 0;
+    static int expected_display_count = 0;
     while (atomic_load(&frame_index) < num_total_frames) {
         int requested_seek = atomic_exchange(&seek_request, -1);
         current_frame = atomic_load(&frame_index);        
@@ -487,13 +571,10 @@ int main(int argc, char **argv) {
         if (requested_seek != -1) {
             printf("Seeking to frame %d\n", requested_seek);
             seek_to_frame(requested_seek);
-            
-            // **CRITICAL FIX**: Reset state after seek
             current_frame = atomic_load(&frame_index);
             accumulated_frame_debt = 0.0;
             stall_count = 0;
             frame_start_time = psTimer();
-            
             continue;
         }
 
@@ -501,89 +582,91 @@ int main(int argc, char **argv) {
         double current_audio_time_ms = current_audio_start_ms + (loop_timer_ms - frame_start_time);
         double expected_video_time = current_frame * frame_time_ms;
 
-        // Calculate target time with debt compensation
-        double target_time_ms = expected_video_time;    
-        if (accumulated_frame_debt > 0.0) {
-            target_time_ms += MIN(accumulated_frame_debt, frame_time_ms * 0.5);
-        } else if (accumulated_frame_debt < 0.0) {
-            target_time_ms += MAX(accumulated_frame_debt, -frame_time_ms * 0.5);
+        // More forgiving timing - don't let debt get too extreme
+        if (accumulated_frame_debt < -frame_time_ms * 10) {
+            printf("⚠️ Resetting extreme negative debt: %.1fms\n", accumulated_frame_debt);
+            accumulated_frame_debt = -frame_time_ms * 2;
         }
+        if (accumulated_frame_debt > frame_time_ms * 10) {
+            printf("⚠️ Resetting extreme positive debt: %.1fms\n", accumulated_frame_debt);
+            accumulated_frame_debt = frame_time_ms * 2;
+        }
+
+        double target_time_ms = expected_video_time + (accumulated_frame_debt * 0.1);
         
-        // Frame skipping logic adapted for deduplicated format
+        // Frame skipping logic (keep existing)
         int frames_to_skip = 0;
         int temp_frame = current_frame;
-
         while ((temp_frame < num_total_frames) &&
-               ((temp_frame * frame_time_ms) < (current_audio_start_ms))) {    
+               ((temp_frame * frame_time_ms) < (current_audio_time_ms - frame_time_ms * 3))) {    
             temp_frame++;
             frames_to_skip++;
-            accumulated_frame_debt = 0.0;
         }
         
         if (frames_to_skip > 0) {
             printf("⚠️ Skipping %d frame(s): %d → %d (audio ahead by %.1fms)\n",
-                frames_to_skip,
-                current_frame,
-                temp_frame,
+                frames_to_skip, current_frame, temp_frame,
                 current_audio_time_ms - expected_video_time);
-
-            for (int f = current_frame; f < temp_frame; f++) {
-                int unique_f = total_to_unique_frame(f);
-                printf("⏩ Would have drawn frame %d (unique %d, buf %d)\n", f, unique_f, unique_f % NUM_BUFFERS);
-            }
-
             atomic_fetch_add(&frame_index, frames_to_skip);
             frames_dropped += frames_to_skip;
             current_frame = temp_frame;
+            accumulated_frame_debt = 0.0;  // Reset debt after skip
         }
         
         double frame_render_start = psTimer();
         
-        if (current_audio_time_ms >= target_time_ms) {
-        if (current_audio_time_ms >= target_time_ms) {
+        // More lenient timing check
+        if (current_audio_time_ms >= (target_time_ms - frame_time_ms * 0.5)) {
             int draw_frame_id = atomic_load(&frame_index);
-            
-            // Convert total frame to unique frame for buffer indexing
             int unique_frame_id = total_to_unique_frame(draw_frame_id);
             int buf_index = unique_frame_id % NUM_BUFFERS;
             
             if (atomic_load_explicit(&buf_state[buf_index], memory_order_acquire) == BUF_READY) {
-                draw_frame(buf_index);
-                atomic_store_explicit(&buf_state[buf_index], BUF_EMPTY, memory_order_release);
+                if (unique_frame_id != last_unique_frame_drawn) {
+                    draw_frame(buf_index);
+                    last_unique_frame_drawn = unique_frame_id;
+                    unique_display_count = 1;
+                    expected_display_count = frame_durations[unique_frame_id];
+                } else {
+                    unique_display_count++;
+                }
+
+                if (unique_display_count >= expected_display_count) {
+                    atomic_store_explicit(&buf_state[buf_index], BUF_EMPTY, memory_order_release);
+                }
+
 
                 stall_count = 0;
                 atomic_fetch_add(&frame_index, 1);
 
-                // New: Always prefetch ahead after a successful draw
-                // Schedule preloads for upcoming unique frames
-                for (int i = 1; i < NUM_BUFFERS; i++) {
-                    int next_total_frame = draw_frame_id + i;
-                    if (next_total_frame >= num_total_frames) break;
-                    schedule_frame_preload(next_total_frame);
+                // Schedule preloads more aggressively
+                int current_total = draw_frame_id + 1;
+                for (int ahead = 1; ahead <= PREFETCH_AHEAD && current_total < num_total_frames; ahead++, current_total++) {
+                    int next_unique = total_to_unique_frame(current_total);
+                    int next_buf = next_unique % NUM_BUFFERS;
+                    
+                    if (atomic_load(&buf_state[next_buf]) == BUF_EMPTY) {
+                        schedule_frame_preload(current_total);
+                    }
                 }
             } else {
-                stall_count++;
-                if (stall_count > 5) {
-                    printf("⚠️ Emergency advancing past stalled frame %d (unique %d)\n", draw_frame_id, unique_frame_id);
-                    atomic_store(&buf_state[buf_index], BUF_EMPTY);
-                    atomic_fetch_add(&frame_index, 1);
-                    prefetch_frames(draw_frame_id);
-                    stall_count = 0;
+                if (stall_count == 0) {
+                    debug_buffer_state(draw_frame_id);
+                    printf("🔄 Trying to schedule preload for stalled frame %d (unique %d)\n", draw_frame_id, unique_frame_id);
+                    schedule_frame_preload(draw_frame_id);
                 }
-            }
-        
                 stall_count++;
-                if (stall_count > 5) {
+                if (stall_count > 10) {  // Increased patience
                     printf("⚠️ Emergency advancing past stalled frame %d (unique %d)\n", draw_frame_id, unique_frame_id);
                     atomic_store(&buf_state[buf_index], BUF_EMPTY);
                     atomic_fetch_add(&frame_index, 1);
-                    prefetch_frames(draw_frame_id);
                     stall_count = 0;
+                    accumulated_frame_debt = 0.0;  // Reset debt after emergency advance
                 }
             }
         }
 
-        // Timing tracking...
+        // Timing tracking with better debt management
         double frame_render_end = psTimer();
         double this_frame_time = frame_render_end - frame_render_start;
 
@@ -593,37 +676,28 @@ int main(int argc, char **argv) {
         avg_frame_time = (avg_frame_time * frame_time_samples + this_frame_time) / (frame_time_samples + 1);
         frame_time_samples++;
 
-        // Step 6: Adjust sync debt
+        // Less aggressive debt accumulation
         double frame_overrun = this_frame_time - frame_time_ms;
-        if (frame_overrun > 0.0) {
-            accumulated_frame_debt -= frame_overrun;
-        } else {
-            accumulated_frame_debt += (-frame_overrun * 0.1);
+        if (frame_overrun > frame_time_ms) {  // Only count severe overruns
+            accumulated_frame_debt -= frame_overrun * 0.5;  // Reduced impact
+        } else if (frame_overrun < 0) {
+            accumulated_frame_debt += (-frame_overrun * 0.05);  // Small positive adjustment
         }
-        accumulated_frame_debt *= 0.95;
+        accumulated_frame_debt *= 0.98;  // Faster decay
 
-        // Optional: debug log
         if (this_frame_time > frame_time_ms * 0.8) {
             printf("⚠️ Frame %d took %.1fms (%.1f%%), debt: %.2fms\n",
                 current_frame, this_frame_time,
                 (this_frame_time / frame_time_ms) * 100.0,
                 accumulated_frame_debt);
-        } else {
-            // Waiting logic
-            double wait_ms = target_time_ms - current_audio_time_ms;
-            
-            if (accumulated_frame_debt < -10.0) {
-                wait_ms = MAX(0.0, wait_ms + accumulated_frame_debt * 0.1);
-            }
-            
-            if (wait_ms > 8.0) {
-                int sleep_ms = (int)(wait_ms - 3.0);
-                if (sleep_ms > 0) {
-                    thd_sleep(sleep_ms);
-                }
-            } else if (wait_ms > 1.0) {
-                thd_pass();
-            }
+        }
+
+        // More reasonable waiting
+        double wait_ms = target_time_ms - current_audio_time_ms;
+        if (wait_ms > 5.0) {
+            thd_sleep((int)(wait_ms * 0.8));
+        } else if (wait_ms > 0.5) {
+            thd_pass();
         }
     }
 
