@@ -12,6 +12,7 @@
  */
 
 #include <kos.h>
+#include <kos/dbgio.h>
 #include <dc/sound/stream.h>
 #include <dc/sound/sound.h>
 #include <dc/pvr.h>
@@ -70,7 +71,7 @@ char screenshotfilename[256];
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #define MAX(a,b) ((a) > (b) ? (a) : (b))
 
-#define NUM_BUFFERS 24
+#define NUM_BUFFERS 16
 static uint8_t *frame_buffer[NUM_BUFFERS];
 
 enum BufState { BUF_EMPTY = 0, BUF_LOADING = 1, BUF_READY = 2 };
@@ -86,8 +87,8 @@ static int GSeekGeneration = 0;
 static atomic_int preload_ring_head = 0;
 static atomic_int preload_ring_tail = 0;
 
-#define PREFETCH_AHEAD 20
-#define INITIAL_PRELOAD 3
+#define PREFETCH_AHEAD (MIN(NUM_BUFFERS, (int)(fps * 2.5)))
+#define INITIAL_PRELOAD 4
 
 _Atomic int buf_state[NUM_BUFFERS] = { BUF_EMPTY };
 static atomic_int buf_ref_count[NUM_BUFFERS] = { 0 };  // Reference count per buffer
@@ -116,16 +117,20 @@ static int load_frame(int unique_frame, int buf_index) {
     uint32_t offset = frame_offsets[unique_frame];
     uint32_t next_offset = frame_offsets[unique_frame + 1];
     uint32_t compressed_size = next_offset - offset;
-
+    double t_seekread = psTimer();
     fs_seek(video_fd, offset, SEEK_SET);
     fs_read(video_fd, compressed_buffer, compressed_size);
-
+    t_seekread = psTimer() - t_seekread;
+    // dbglog(DBG_INFO, "Frame %d compressed size: %u\n", unique_frame, compressed_size);
+    double t_decomp = psTimer();
     if(use_zstd == 1) {
+
         size_t res = ZSTD_decompressDCtx(dctx,
                                         frame_buffer[buf_index],
                                         video_frame_size,
                                         compressed_buffer,
                                         compressed_size);
+        // printf("Frame %d decode time: %.2fms\n", unique_frame, psTimer() - start);                                        
         if (ZSTD_isError(res)) {
             printf("❌ ZSTD decompress error on frame %d: %s\n", unique_frame, ZSTD_getErrorName(res));
             return -1;
@@ -141,6 +146,8 @@ static int load_frame(int unique_frame, int buf_index) {
             return -1;
         }
     }
+    t_decomp = psTimer() - t_decomp;
+    printf("Frame %d load: read=%.2fms, decompress=%.2fms\n", unique_frame, t_seekread, t_decomp);
     return 0;
 }
 
@@ -230,17 +237,18 @@ static int init_pvr(int frame_type) {
     pvr_poly_cxt_t cxt;
     if (use_strided) {
         int txr_format = (frame_type == 1)
-            ? PVR_TXRFMT_YUV422 | PVR_TXRFMT_VQ_ENABLE | PVR_TXRFMT_NONTWIDDLED | (1 << 25)
-            : PVR_TXRFMT_RGB565 | PVR_TXRFMT_VQ_ENABLE | PVR_TXRFMT_NONTWIDDLED | (1 << 25);
+            ? PVR_TXRFMT_YUV422 | PVR_TXRFMT_VQ_ENABLE | PVR_TXRFMT_NONTWIDDLED | PVR_TXRFMT_X32_STRIDE
+            : PVR_TXRFMT_RGB565 | PVR_TXRFMT_VQ_ENABLE | PVR_TXRFMT_NONTWIDDLED | PVR_TXRFMT_X32_STRIDE;
 
         int pot_width = 1, pot_height = 1;
         while (pot_width < video_width) pot_width <<= 1;
         while (pot_height < video_height) pot_height <<= 1;
 
         pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY, txr_format,
-                         pot_width, pot_height, pvr_txr, PVR_FILTER_BILINEAR);
+                         pot_width, pot_height, pvr_txr, PVR_FILTER_NONE);
         pvr_poly_compile(&hdr, &cxt);
-        PVR_SET(PVR_TEXTURE_MODULO, (video_width / 32));
+        // PVR_SET(PVR_TEXTURE_MODULO, (video_width / 32));
+        pvr_txr_set_stride(video_width);
 
         vert[0] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=0,.y=0,.z=1,.u=0,.v=0,.argb=0xffffffff};
         vert[1] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=640,.y=0,.z=1,.u=(float)content_width/pot_width,.v=0,.argb=0xffffffff};
@@ -250,7 +258,7 @@ static int init_pvr(int frame_type) {
         pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
                          (frame_type == 1 ? PVR_TXRFMT_YUV422 : PVR_TXRFMT_RGB565) |
                          PVR_TXRFMT_TWIDDLED | PVR_TXRFMT_VQ_ENABLE,
-                         video_width, video_height, pvr_txr, PVR_FILTER_BILINEAR);
+                         video_width, video_height, pvr_txr, PVR_FILTER_NONE);
         pvr_poly_compile(&hdr, &cxt);
         vert[0] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=0,.y=0,.z=1,.u=0,.v=0,.argb=0xffffffff};
         vert[1] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=640,.y=0,.z=1,.u=1,.v=0,.argb=0xffffffff};
@@ -261,7 +269,9 @@ static int init_pvr(int frame_type) {
 }
 
 void draw_frame(int buf_index) {
-    pvr_txr_load(frame_buffer[buf_index], pvr_txr, video_frame_size);
+    // pvr_txr_load(frame_buffer[buf_index], pvr_txr, video_frame_size);
+    pvr_txr_load_dma(frame_buffer[buf_index], pvr_txr, video_frame_size, -1, NULL, 0);
+
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
     pvr_dr_state_t dr;
@@ -299,13 +309,13 @@ bool schedule_frame_preload(int frame) {
     return true;
 }
 
-static void prefetch_frames(int current_frame) {
-    for (int i = 1; i <= PREFETCH_AHEAD; i++) {
-        int next = current_frame + i;
-        if (next >= num_total_frames) break;
-        schedule_frame_preload(next);
-    }
-}
+// static void prefetch_frames(int current_frame) {
+//     for (int i = 1; i <= PREFETCH_AHEAD; i++) {
+//         int next = current_frame + i;
+//         if (next >= num_total_frames) break;
+//         schedule_frame_preload(next);
+//     }
+// }
 
 void seek_to_frame(int new_frame) {
     if (new_frame < 0) new_frame = 0;
@@ -389,7 +399,7 @@ static void wait_exit(void) {
 
 void *worker_thread(void *p) {
     while (1) {
-        snd_stream_poll(stream);
+
         int tail = atomic_load(&preload_ring_tail);
         int head = atomic_load(&preload_ring_head);
 
@@ -413,8 +423,9 @@ void *worker_thread(void *p) {
             }
             atomic_store(&preload_ring_tail, (tail + 1) % RING_CAPACITY);
         }
-        wait_exit();
-        thd_pass();
+        
+                snd_stream_poll(stream);
+                wait_exit();
     }
     return NULL;
 }
@@ -436,6 +447,7 @@ void debug_buffer_state(int current_frame) {
 int main(int argc, char **argv) {
     atomic_store(&frame_index, 0);
     int current_frame = atomic_load(&frame_index);
+    // dbgio_dev_select("fb");
 
     video_fd = fs_open(VIDEO_FILE, O_RDONLY);
     if (video_fd < 0 || load_header() < 0) return -1;
@@ -463,13 +475,12 @@ int main(int argc, char **argv) {
         //     printf("❌ Failed to create DDict\n");
         //     return -1;
         // }
-
-        dctx = ZSTD_createDCtx();
+        dctx = ZSTD_createDCtx();        
         ZSTD_DCtx_setParameter(dctx, ZSTD_d_format, ZSTD_f_zstd1_magicless);
-        ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 14);
+        ZSTD_DCtx_setParameter(dctx, ZSTD_d_windowLogMax, 16);      // 64 KB window
+        ZSTD_DCtx_setParameter(dctx, ZSTD_d_maxBlockSize, 65536);   // 64 KB block
         ZSTD_DCtx_setParameter(dctx, ZSTD_d_forceIgnoreChecksum, 1);
-        ZSTD_DCtx_setParameter(dctx, ZSTD_d_refMultipleDDicts, ZSTD_rmd_refSingleDDict);
-        ZSTD_DCtx_setParameter(dctx, ZSTD_d_maxBlockSize, 131072);
+        // ZSTD_DCtx_setParameter(dctx, ZSTD_d_refMultipleDDicts, ZSTD_rmd_refSingleDDict);
         // ZSTD_DCtx_refDDict(dctx, ddict);
         ZSTD_DCtx_refDDict(dctx, NULL);
         ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);
@@ -533,7 +544,7 @@ int main(int argc, char **argv) {
     printf("🔄 Loading initial frames synchronously...\n");
     atomic_store(&seek_request, current_frame);
     // Load first few unique frames directly (not through worker thread)
-    for (int i = 0; i < MIN(NUM_BUFFERS, 8); i++) {
+    for (int i = 0; i < MIN(NUM_BUFFERS, INITIAL_PRELOAD); i++) {
         if (i >= num_unique_frames) break;
         
         int buf_index = i % NUM_BUFFERS;
@@ -634,7 +645,7 @@ int main(int argc, char **argv) {
                 if (unique_display_count >= expected_display_count) {
                     atomic_store_explicit(&buf_state[buf_index], BUF_EMPTY, memory_order_release);
                 }
-
+                
 
                 stall_count = 0;
                 atomic_fetch_add(&frame_index, 1);

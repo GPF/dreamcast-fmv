@@ -19,8 +19,8 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-# INPUT="input/dolby-atmos-trailer_amaze_1080.mp4"
-INPUT="input/lair.ogv" # Example for other video
+INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4"
+# INPUT="input/lair.ogv" # Example for other video
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
 TEMP_DIR="temp_frames"
@@ -29,21 +29,22 @@ FINAL_OUTPUT="./playdcmv/movie.dcmv"
 # Video Settings
 FPS=23.97
 FORMAT="yuv422" # Options: rgb565, yuv422
-USE_STRIDED=true # true = 320x240 strided, false = 512x256 POT with padding
+USE_STRIDED=false # true = 320x240 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=640 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=480
+SCALE_WIDTH=320 # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT=240
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
-# VIDEO_FRAMES="99999" # Default to process all frames
-VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
+VIDEO_FRAMES="99999" # Default to process all frames
+# VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
 
 # Audio Settings
-AUDIO_RATE=22150
-CHANNELS=1
+AUDIO_RATE=44100
+CHANNELS=2
 
+USE_DEDUP=true  # Set to false to disable frame deduplication
 COMPRESSION_BACKEND="zstd" # Options: lz4, zstd
 
 if [ "$USE_STRIDED" = true ]; then
@@ -160,12 +161,21 @@ process_rgb565() {
     fi
 
     # Deduplicate frames regardless of .dt files
-    if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$UNIQUE_FRAMES/frame*.${INTERMEDIATE_FORMAT}" >/dev/null; then
-        echo "✅ Found unique frames, skipping deduplication."
+    if [ "$USE_DEDUP" = true ]; then
+        if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$UNIQUE_FRAMES/frame*.${INTERMEDIATE_FORMAT}" >/dev/null; then
+            echo "✅ Found unique frames, skipping deduplication."
+        else
+            echo "🔍 Running frame deduplication..."
+            rm -rf "$UNIQUE_FRAMES"
+            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" 0.5 || exit 1
+        fi
     else
-        echo "🔍 Running frame deduplication..."
+        echo "🧱 Deduplication disabled. Copying frames and generating frame_durations.txt with all 1s..."
         rm -rf "$UNIQUE_FRAMES"
-        python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" 0.5 || exit 1
+        mkdir -p "$UNIQUE_FRAMES"
+        cp "$TEMP_DIR"/frame*."$INTERMEDIATE_FORMAT" "$UNIQUE_FRAMES"/
+        num_frames=$(ls "$UNIQUE_FRAMES" | grep -c "$INTERMEDIATE_FORMAT")
+        yes 1 | head -n "$num_frames" > "$UNIQUE_FRAMES/frame_durations.txt"
     fi
 
     # Convert unique frames if no .dt files exist

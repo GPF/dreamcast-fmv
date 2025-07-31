@@ -60,8 +60,9 @@ def generate_durations(input_dir, output_dir, threshold=0.5):
             shutil.copy2(current_path, unique_out_path)
             unique_count += 1
 
-        if (i + 1) % 500 == 0:
-            print(f"Processed {i+1}/{len(frames)} frames...")
+        if (i + 1) % 500 == 0 or (i + 1) == len(frames):
+            print(f"   Processed {i+1}/{len(frames)} frames ({(i+1)/len(frames)*100:.1f}%)", end='\r', flush=True)
+    print()  
 
     # Write frame_durations.txt
     durations_path = os.path.join(output_dir, "frame_durations.txt")

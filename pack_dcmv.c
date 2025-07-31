@@ -292,11 +292,11 @@ int main(int argc, char **argv) {
     if (use_zstd) {
         cctx = ZSTD_createCCtx();
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_format, ZSTD_f_zstd1_magicless);
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 16);
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 22);
-        ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 14);  // Reduce memory
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, 0);
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 0);
-
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_contentSizeFlag, 0);
         // // 🔽 Add dictionary load here
         // FILE *dict_file = fopen("./playdcmv/fmv_dict", "rb");
         // if (!dict_file) {
