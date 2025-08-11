@@ -56,10 +56,10 @@ static atomic_int audio_bytes_fed = 0;
 snd_stream_hnd_t stream;
 static kthread_t *wthread;
 static atomic_int audio_muted = 0;
-static double frame_duration = 1.0f / 30.0f;
-static _Atomic double audio_start_time_ms = 0.0;
-static atomic_int seek_request = -1;
-static double frame_start_time = 0.0;
+static float frame_duration = 1.0f / 30.0f;
+static _Atomic float audio_start_time_ms = 0.0f;
+static atomic_int seek_request = -1;  // This one's fine as-is
+static float frame_start_time = 0.0f;
 int use_zstd = 0;
 pvr_ptr_t pvr_txr;
 pvr_poly_hdr_t hdr;
@@ -87,7 +87,7 @@ static int GSeekGeneration = 0;
 static atomic_int preload_ring_head = 0;
 static atomic_int preload_ring_tail = 0;
 
-#define PREFETCH_AHEAD (MIN(NUM_BUFFERS, (int)(fps * 2.5)))
+#define PREFETCH_AHEAD (MIN(NUM_BUFFERS, (int)(fps * 2.5f)))
 #define INITIAL_PRELOAD 4
 
 _Atomic int buf_state[NUM_BUFFERS] = { BUF_EMPTY };
@@ -97,10 +97,11 @@ static volatile int audio_started = 0;
 int soundbufferalloc = 4096;
 static volatile float current_audio_frame = 0;
 
-static inline double psTimer(void) {
+static inline float psTimer(void) {
     #define AICA_MEM_CLOCK 0x021000
     uint32_t jiffies = g2_read_32(SPU_RAM_UNCACHED_BASE + AICA_MEM_CLOCK);
-    return jiffies / 4.410f;
+    const float AICA_TICKS_PER_MS = 4.410f; 
+    return jiffies / AICA_TICKS_PER_MS;
 }
 
 // Map total frame index -> unique frame index
@@ -117,12 +118,12 @@ static int load_frame(int unique_frame, int buf_index) {
     uint32_t offset = frame_offsets[unique_frame];
     uint32_t next_offset = frame_offsets[unique_frame + 1];
     uint32_t compressed_size = next_offset - offset;
-    double t_seekread = psTimer();
+    // float t_seekread = psTimer();
     fs_seek(video_fd, offset, SEEK_SET);
     fs_read(video_fd, compressed_buffer, compressed_size);
-    t_seekread = psTimer() - t_seekread;
-    // dbglog(DBG_INFO, "Frame %d compressed size: %u\n", unique_frame, compressed_size);
-    double t_decomp = psTimer();
+    // t_seekread = psTimer() - t_seekread;
+    // // dbglog(DBG_INFO, "Frame %d compressed size: %u\n", unique_frame, compressed_size);
+    // float t_decomp = psTimer();
     if(use_zstd == 1) {
 
         size_t res = ZSTD_decompressDCtx(dctx,
@@ -146,8 +147,8 @@ static int load_frame(int unique_frame, int buf_index) {
             return -1;
         }
     }
-    t_decomp = psTimer() - t_decomp;
-    printf("Frame %d load: read=%.2fms, decompress=%.2fms\n", unique_frame, t_seekread, t_decomp);
+    // t_decomp = psTimer() - t_decomp;
+    // printf("Frame %d load: read=%.2fms, decompress=%.2fms\n", unique_frame, t_seekread, t_decomp);
     return 0;
 }
 
@@ -178,7 +179,7 @@ static int load_header(void) {
     uint32_t version;
     fs_read(video_fd, &version, 4);
     if (version != 6) {
-        printf("❌ Unsupported DCMV version: %d (expected 6)\n", version);
+        printf("❌ Unsupported DCMV version: %ld (expected 6)\n", version);
         return -1;
     }
 
@@ -207,7 +208,7 @@ static int load_header(void) {
         compression_str = "Zstandard";
     }
 
-    printf("📦 Header v%d: %s %dx%d (content: %dx%d) @ %.2ffps, %dHz, %dch, unique=%d, total=%d\n",
+    printf("📦 Header v%ld: %s %dx%d (content: %dx%d) @ %.2ffps, %dHz, %dch, unique=%d, total=%d\n",
         version,
         frame_type == 1 ? "YUV422" : "RGB565",
         video_width, video_height, content_width, content_height,
@@ -245,25 +246,37 @@ static int init_pvr(int frame_type) {
         while (pot_height < video_height) pot_height <<= 1;
 
         pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY, txr_format,
-                         pot_width, pot_height, pvr_txr, PVR_FILTER_NONE);
+                         pot_width, pot_height, pvr_txr, PVR_FILTER_NEAREST);
         pvr_poly_compile(&hdr, &cxt);
         // PVR_SET(PVR_TEXTURE_MODULO, (video_width / 32));
         pvr_txr_set_stride(video_width);
 
+        int display_width = (video_width == 320) ? 320 : 640;
+        int display_height = (video_width == 320) ? 240 : 480;
+
         vert[0] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=0,.y=0,.z=1,.u=0,.v=0,.argb=0xffffffff};
-        vert[1] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=640,.y=0,.z=1,.u=(float)content_width/pot_width,.v=0,.argb=0xffffffff};
-        vert[2] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=0,.y=480,.z=1,.u=0,.v=(float)content_height/pot_height,.argb=0xffffffff};
-        vert[3] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX_EOL,.x=640,.y=480,.z=1,.u=(float)content_width/pot_width,.v=(float)content_height/pot_height,.argb=0xffffffff};
+        vert[1] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=display_width,.y=0,.z=1,.u=(float)content_width/pot_width,.v=0,.argb=0xffffffff};
+        vert[2] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=0,.y=display_height,.z=1,.u=0,.v=(float)content_height/pot_height,.argb=0xffffffff};
+        vert[3] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX_EOL,.x=display_width,.y=display_height,.z=1,.u=(float)content_width/pot_width,.v=(float)content_height/pot_height,.argb=0xffffffff};        
+     
     } else {
         pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY,
                          (frame_type == 1 ? PVR_TXRFMT_YUV422 : PVR_TXRFMT_RGB565) |
                          PVR_TXRFMT_TWIDDLED | PVR_TXRFMT_VQ_ENABLE,
-                         video_width, video_height, pvr_txr, PVR_FILTER_NONE);
+                         video_width, video_height, pvr_txr, PVR_FILTER_NEAREST);
         pvr_poly_compile(&hdr, &cxt);
-        vert[0] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=0,.y=0,.z=1,.u=0,.v=0,.argb=0xffffffff};
-        vert[1] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=640,.y=0,.z=1,.u=1,.v=0,.argb=0xffffffff};
-        vert[2] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,.x=0,.y=480,.z=1,.u=0,.v=1,.argb=0xffffffff};
-        vert[3] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX_EOL,.x=640,.y=480,.z=1,.u=1,.v=1,.argb=0xffffffff};
+
+        // Twiddled + center-padded texture: crop out the black pad
+        float umin = (float)(video_width  - content_width)  / (2.0f * video_width);
+        float vmin = (float)(video_height - content_height) / (2.0f * video_height);
+        float umax = 1.0f - umin;
+        float vmax = 1.0f - vmin;
+
+        vert[0] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,    .x=0,  .y=0,   .z=1, .u=umin, .v=vmin, .argb=0xffffffff};
+        vert[1] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,    .x=640,.y=0,   .z=1, .u=umax, .v=vmin, .argb=0xffffffff};
+        vert[2] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX,    .x=0,  .y=480, .z=1, .u=umin, .v=vmax, .argb=0xffffffff};
+        vert[3] = (pvr_vertex_t){.flags=PVR_CMD_VERTEX_EOL,.x=640,.y=480, .z=1, .u=umax, .v=vmax, .argb=0xffffffff};
+
     }
     return 0;
 }
@@ -352,7 +365,7 @@ void seek_to_frame(int new_frame) {
 
     atomic_store(&frame_index, new_frame);
     frame_start_time = psTimer();
-    double new_audio_time = (double)(new_frame * samples_per_frame) * 1000.0 / sample_rate;
+    float new_audio_time = (float)(new_frame * samples_per_frame) * 1000.0f / sample_rate;
     atomic_store(&audio_start_time_ms, new_audio_time);
 
     // Schedule initial preloads more intelligently
@@ -451,7 +464,7 @@ int main(int argc, char **argv) {
 
     video_fd = fs_open(VIDEO_FILE, O_RDONLY);
     if (video_fd < 0 || load_header() < 0) return -1;
-
+    vid_set_mode(video_width == 320 ? DM_320x240 : DM_640x480, PM_RGB565);
     if (use_zstd == 1) {
         // FILE *dict_file = fopen("/pc/fmv_dict", "rb");
         // if (!dict_file) {
@@ -530,9 +543,15 @@ int main(int argc, char **argv) {
     snd_stream_set_callback_direct(stream, audio_cb);
 
     // Calculate timing in milliseconds
-    double frame_time_ms = 1000.0 / (double)fps; // ~43.48ms for 23fps
+    float frame_time_ms = 1000.0f / (float)fps; // ~43.48ms for 23fps
+    float duration_seconds = (float)num_total_frames / (float)fps;
+    int minutes = (int)(duration_seconds / 60);
+    int seconds = (int)duration_seconds % 60;
+
     printf("Frame timing: %.2fms per frame\n", frame_time_ms);
-    printf("✅ Starting playback with %d total frames, %d unique frames\n", num_total_frames, num_unique_frames);
+    printf("Video duration: %d:%02d (%d total frames, %d unique)\n", 
+        minutes, seconds, num_total_frames, num_unique_frames);
+    printf("✅ Starting playback\n");
     
     atomic_store(&audio_muted, 1);
     snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
@@ -566,18 +585,18 @@ int main(int argc, char **argv) {
 
     printf("✅ Initial frames loaded. Starting playback at frame %d\n", current_frame);
 
-    double accumulated_frame_debt = 0.0;
+    float accumulated_frame_debt = 0.0f;
     int frames_dropped = 0;
-    double max_frame_time = 0.0;
-    double avg_frame_time = 0.0;
-    double frame_time_samples = 0.0;
+    float max_frame_time = 0.0f;
+    float avg_frame_time = 0.0f;
+    float frame_time_samples = 0.0f;
     int stall_count = 0;
     static int unique_display_count = 0;
     static int expected_display_count = 0;
     while (atomic_load(&frame_index) < num_total_frames) {
         int requested_seek = atomic_exchange(&seek_request, -1);
         current_frame = atomic_load(&frame_index);        
-        double loop_timer_ms = psTimer();
+        float loop_timer_ms = psTimer();
         
         if (requested_seek != -1) {
             printf("Seeking to frame %d\n", requested_seek);
@@ -589,9 +608,9 @@ int main(int argc, char **argv) {
             continue;
         }
 
-        double current_audio_start_ms = atomic_load(&audio_start_time_ms);
-        double current_audio_time_ms = current_audio_start_ms + (loop_timer_ms - frame_start_time);
-        double expected_video_time = current_frame * frame_time_ms;
+        float current_audio_start_ms = atomic_load(&audio_start_time_ms);
+        float current_audio_time_ms = current_audio_start_ms + (loop_timer_ms - frame_start_time);
+        float expected_video_time = current_frame * frame_time_ms;
 
         // More forgiving timing - don't let debt get too extreme
         if (accumulated_frame_debt < -frame_time_ms * 10) {
@@ -603,7 +622,7 @@ int main(int argc, char **argv) {
             accumulated_frame_debt = frame_time_ms * 2;
         }
 
-        double target_time_ms = expected_video_time + (accumulated_frame_debt * 0.1);
+        float target_time_ms = expected_video_time + (accumulated_frame_debt * 0.1f);
         
         // Frame skipping logic (keep existing)
         int frames_to_skip = 0;
@@ -624,10 +643,10 @@ int main(int argc, char **argv) {
             accumulated_frame_debt = 0.0;  // Reset debt after skip
         }
         
-        double frame_render_start = psTimer();
+        float frame_render_start = psTimer();
         
         // More lenient timing check
-        if (current_audio_time_ms >= (target_time_ms - frame_time_ms * 0.5)) {
+        if (current_audio_time_ms >= (target_time_ms - frame_time_ms * 0.5f)) {
             int draw_frame_id = atomic_load(&frame_index);
             int unique_frame_id = total_to_unique_frame(draw_frame_id);
             int buf_index = unique_frame_id % NUM_BUFFERS;
@@ -678,8 +697,8 @@ int main(int argc, char **argv) {
         }
 
         // Timing tracking with better debt management
-        double frame_render_end = psTimer();
-        double this_frame_time = frame_render_end - frame_render_start;
+        float frame_render_end = psTimer();
+        float this_frame_time = frame_render_end - frame_render_start;
 
         if (this_frame_time > max_frame_time)
             max_frame_time = this_frame_time;
@@ -688,26 +707,26 @@ int main(int argc, char **argv) {
         frame_time_samples++;
 
         // Less aggressive debt accumulation
-        double frame_overrun = this_frame_time - frame_time_ms;
+        float frame_overrun = this_frame_time - frame_time_ms;
         if (frame_overrun > frame_time_ms) {  // Only count severe overruns
-            accumulated_frame_debt -= frame_overrun * 0.5;  // Reduced impact
+            accumulated_frame_debt -= frame_overrun * 0.5f;  // Reduced impact
         } else if (frame_overrun < 0) {
-            accumulated_frame_debt += (-frame_overrun * 0.05);  // Small positive adjustment
+            accumulated_frame_debt += (-frame_overrun * 0.05f);  // Small positive adjustment
         }
-        accumulated_frame_debt *= 0.98;  // Faster decay
+        accumulated_frame_debt *= 0.98f;  // Faster decay
 
-        if (this_frame_time > frame_time_ms * 0.8) {
+        if (this_frame_time > frame_time_ms * 0.8f) {
             printf("⚠️ Frame %d took %.1fms (%.1f%%), debt: %.2fms\n",
                 current_frame, this_frame_time,
-                (this_frame_time / frame_time_ms) * 100.0,
+                (this_frame_time / frame_time_ms) * 100.0f,
                 accumulated_frame_debt);
         }
 
         // More reasonable waiting
-        double wait_ms = target_time_ms - current_audio_time_ms;
-        if (wait_ms > 5.0) {
-            thd_sleep((int)(wait_ms * 0.8));
-        } else if (wait_ms > 0.5) {
+        float wait_ms = target_time_ms - current_audio_time_ms;
+        if (wait_ms > 5.0f) {
+            thd_sleep((int)(wait_ms * 0.8f));
+        } else if (wait_ms > 0.5f) {
             thd_pass();
         }
     }
