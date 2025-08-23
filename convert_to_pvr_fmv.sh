@@ -19,25 +19,29 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4"
-# INPUT="input/lair.ogv" # Example for other video
+# INPUT="input/cliff.ogv"
+# INPUT="input/lair.ogv"
+# INPUT="input/lair.m2v" # Example for other video
+# AUDIOINPUT="input/lair.ogg" # Example for audio input
+INPUT="input/Dreamcast Startup (60fps).mp4"
+AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
 TEMP_DIR="temp_frames"
 FINAL_OUTPUT="./playdcmv/movie.dcmv"
 
 # Video Settings
-FPS=23.97
+FPS=59.94
 FORMAT="yuv422" # Options: rgb565, yuv422
-USE_STRIDED=false # true = 320x240 strided, false = 512x256 POT with padding
+USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=320 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=240
+SCALE_WIDTH=640 # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT=480
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
-VIDEO_FRAMES="99999" # Default to process all frames
+# VIDEO_FRAMES="99999" # Default to process all frames
 # VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
 
 # Audio Settings
@@ -45,7 +49,7 @@ AUDIO_RATE=44100
 CHANNELS=2
 
 USE_DEDUP=true  # Set to false to disable frame deduplication
-COMPRESSION_BACKEND="zstd" # Options: lz4, zstd
+COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
 
 if [ "$USE_STRIDED" = true ]; then
     WIDTH=640 # Direct strided texture
@@ -104,6 +108,48 @@ case "$FORMAT" in
 esac
 
 # Build FFmpeg filter chain based on texture mode and frame limits
+# build_ffmpeg_opts() {
+#     local base_opts=(
+#         -hide_banner
+#         -loglevel "$FFMPEG_LOGLEVEL"
+#         -y
+#         -i "$INPUT"
+#     )
+
+#     local filter_chain=""
+#     if [ "$USE_STRIDED" = true ]; then
+#         filter_chain="scale=${SCALE_WIDTH}:${SCALE_HEIGHT}:flags=lanczos"
+#     else
+#         filter_chain="scale=${SCALE_WIDTH}:${SCALE_HEIGHT}:flags=lanczos,pad=${WIDTH}:${HEIGHT}:${PAD_X}:${PAD_Y}:black"
+#     fi
+
+#     # Keep hqdn3d as it's a good quality filter
+#     filter_chain="${filter_chain},hqdn3d=0.8:0.6:4.0:3.0"
+
+#     # Frame limiting: Use -frames:v for robustness
+#     local output_frame_limit_opts=()
+
+#     if [[ "$VIDEO_FRAMES" =~ ^[0-9]+$ ]]; then
+#         # If VIDEO_FRAMES is a number, use -frames:v directly
+#         echo "✂️ Limiting video to $VIDEO_FRAMES frames using -frames:v."
+#         output_frame_limit_opts+=("-frames:v" "$VIDEO_FRAMES")
+#     else
+#         echo "🎥 Processing all frames."
+#     fi
+
+#     # Construct the final FFMPEG_OPTS array
+#     FFMPEG_OPTS=(
+#         "${base_opts[@]}"
+#         -vf "$filter_chain"
+#         -pix_fmt "$FFMPEG_PIX_FMT"
+#         -sws_flags "+accurate_rnd+full_chroma_int+full_chroma_inp"
+#         -r "$FPS"
+#         -start_number 0
+#         "${output_frame_limit_opts[@]}"
+#     )
+# }
+
+# Build FFmpeg filter chain - MINIMAL VERSION
 build_ffmpeg_opts() {
     local base_opts=(
         -hide_banner
@@ -113,38 +159,30 @@ build_ffmpeg_opts() {
     )
 
     local filter_chain=""
+    
     if [ "$USE_STRIDED" = true ]; then
         filter_chain="scale=${SCALE_WIDTH}:${SCALE_HEIGHT}:flags=lanczos"
-    else
+    else  
         filter_chain="scale=${SCALE_WIDTH}:${SCALE_HEIGHT}:flags=lanczos,pad=${WIDTH}:${HEIGHT}:${PAD_X}:${PAD_Y}:black"
     fi
 
-    # Keep hqdn3d as it's a good quality filter
-    filter_chain="${filter_chain},hqdn3d=0.8:0.6:4.0:3.0"
-
-    # Frame limiting: Use -frames:v for robustness
+    # Frame limiting
     local output_frame_limit_opts=()
-
     if [[ "$VIDEO_FRAMES" =~ ^[0-9]+$ ]]; then
-        # If VIDEO_FRAMES is a number, use -frames:v directly
         echo "✂️ Limiting video to $VIDEO_FRAMES frames using -frames:v."
         output_frame_limit_opts+=("-frames:v" "$VIDEO_FRAMES")
     else
         echo "🎥 Processing all frames."
     fi
 
-    # Construct the final FFMPEG_OPTS array
+    # MINIMAL FFMPEG_OPTS
     FFMPEG_OPTS=(
         "${base_opts[@]}"
         -vf "$filter_chain"
-        -pix_fmt "$FFMPEG_PIX_FMT"
-        -sws_flags "+accurate_rnd+full_chroma_int+full_chroma_inp"
-        -r "$FPS"
         -start_number 0
         "${output_frame_limit_opts[@]}"
     )
 }
-
 process_rgb565() {
     EXT="dt"
     FRAME_TYPE=0 # RGB565
@@ -167,7 +205,7 @@ process_rgb565() {
         else
             echo "🔍 Running frame deduplication..."
             rm -rf "$UNIQUE_FRAMES"
-            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" 0.5 || exit 1
+            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" .5 || exit 1
         fi
     else
         echo "🧱 Deduplication disabled. Copying frames and generating frame_durations.txt with all 1s..."
@@ -219,12 +257,21 @@ process_yuv422() {
     fi
 
     # Deduplicate frames
-    if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$UNIQUE_FRAMES/frame*.${INTERMEDIATE_FORMAT}" >/dev/null; then
-        echo "✅ Found unique frames, skipping deduplication."
+    if [ "$USE_DEDUP" = true ]; then
+        if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$UNIQUE_FRAMES/frame*.${INTERMEDIATE_FORMAT}" >/dev/null; then
+            echo "✅ Found unique frames, skipping deduplication."
+        else
+            echo "🔍 Running frame deduplication..."
+            rm -rf "$UNIQUE_FRAMES"
+            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" .1 || exit 1
+        fi
     else
-        echo "🔍 Running frame deduplication..."
+        echo "🧱 Deduplication disabled. Copying frames and generating frame_durations.txt with all 1s..."
         rm -rf "$UNIQUE_FRAMES"
-        python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" 0.5 || exit 1
+        mkdir -p "$UNIQUE_FRAMES"
+        cp "$TEMP_DIR"/frame*."$INTERMEDIATE_FORMAT" "$UNIQUE_FRAMES"/
+        num_frames=$(ls "$UNIQUE_FRAMES" | grep -c "$INTERMEDIATE_FORMAT")
+        yes 1 | head -n "$num_frames" > "$UNIQUE_FRAMES/frame_durations.txt"
     fi
 
     # Convert unique frames to VQ-compressed format
@@ -275,7 +322,7 @@ if [ "$SKIP_IF_EXISTS" = true ] && [[ -f "$AUDIO_OUT" ]]; then
     echo "✅ Found existing audio.dca, skipping audio extraction."
 else
     echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
-    ffmpeg -hide_banner -loglevel error -i "$INPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
+    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
     "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
       -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
 fi

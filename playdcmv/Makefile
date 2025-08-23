@@ -5,6 +5,7 @@ all: rm-elf $(TARGET)
 
 include $(KOS_BASE)/Makefile.rules
 
+# KOS_CFLAGS += -Wfloat-conversion -Wdouble-promotion
 clean: rm-elf
 	-rm -f $(OBJS) 
 
@@ -12,7 +13,7 @@ rm-elf:
 	-rm -f $(TARGET)
 
 $(TARGET): $(OBJS)
-	kos-cc -o  $(TARGET) $(OBJS) -L$(KOS_BASE)/lib -llz4 -lzstd -lfastmem
+	kos-cc -o  $(TARGET) $(OBJS)  -L$(KOS_BASE)/lib -llz4 -lzstd -lfastmem -nostdlib
 
 run: $(TARGET)
 	$(KOS_LOADER) $(TARGET)

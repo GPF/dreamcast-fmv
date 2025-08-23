@@ -198,6 +198,20 @@ int load_durations(const char *path) {
     return 0;
 }
 
+// Function to pad file to next 2048-byte boundary
+void pad_to_alignment(FILE *fp, size_t alignment) {
+    long current_pos = ftell(fp);
+    long remainder = current_pos % alignment;
+    if (remainder != 0) {
+        long padding_needed = alignment - remainder;
+        uint8_t zero = 0;
+        for (long i = 0; i < padding_needed; i++) {
+            fwrite(&zero, 1, 1, fp);
+        }
+        // printf("   Added %ld bytes of padding for %zu-byte alignment\n", padding_needed, alignment);
+    }
+}
+
 int main(int argc, char **argv) {
     if (argc != 14) {
         printf("Usage: %s <output.dcmv> <frame_type> <width> <height> "
@@ -276,6 +290,9 @@ int main(int argc, char **argv) {
     fseek(out, (num_unique_frames + 1) * sizeof(uint32_t), SEEK_CUR);
     long duration_table_pos = ftell(out);
     fseek(out, num_unique_frames * sizeof(uint16_t), SEEK_CUR);
+
+    // ✅ Only align to 32 for frame data
+    // pad_to_alignment(out, 32);
     offsets[0] = ftell(out);
 
     // Compress frames
@@ -293,7 +310,7 @@ int main(int argc, char **argv) {
         cctx = ZSTD_createCCtx();
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_format, ZSTD_f_zstd1_magicless);
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_windowLog, 16);
-        ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 22);
+        ZSTD_CCtx_setParameter(cctx, ZSTD_c_compressionLevel, 13);
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_enableLongDistanceMatching, 0);
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_checksumFlag, 0);
         ZSTD_CCtx_setParameter(cctx, ZSTD_c_contentSizeFlag, 0);
@@ -365,7 +382,7 @@ int main(int argc, char **argv) {
         } else {
             // LZ4 compression path
             int comp_size = LZ4_compress_HC((const char *)frame_buf, (char *)compressed_buf,
-                                 frame_size, LZ4_compressBound(frame_size), 12);
+                                frame_size, LZ4_compressBound(frame_size), 12);
             if (comp_size <= 0) {
                 fprintf(stderr, "LZ4 compression failed on frame %d\n", i);
                 return 1;
@@ -374,18 +391,31 @@ int main(int argc, char **argv) {
             fwrite(compressed_buf, 1, comp_size, out);
             if (comp_size > max_compressed_size) max_compressed_size = comp_size;
         }
-        if (i < num_unique_frames - 1) offsets[i + 1] = ftell(out);
+        
+        // Set the offset for the NEXT frame BEFORE padding
+        if (i < num_unique_frames - 1) {
+            // Pad current frame to 32-byte boundary
+            // pad_to_alignment(out, 32);
+            // Now set the offset for the next frame
+            offsets[i + 1] = ftell(out);
+        }
+        
         if ((i + 1) % 100 == 0 || i == num_unique_frames - 1) {
-            // printf("\r  Frame %u compressed: %zu bytes", i, use_zstd ? output.pos : (size_t)comp_size);
             printf("\r   Processed %u/%u frames (%.1f%%)", i + 1, num_unique_frames, (float)(i + 1) / num_unique_frames * 100.0f);
             fflush(stdout);
         }
     }
     printf("\n");
-
-    // Audio offset
+    
+    // Pad to 2048-byte boundary before audio
+    // printf("📐 Aligning audio to 2048-byte boundary...\n");
+    // pad_to_alignment(out, 2048);
+    
+    // Audio offset (now aligned)
     uint32_t audio_offset = ftell(out);
     offsets[num_unique_frames] = audio_offset;
+    
+    printf("🔊 Audio will start at offset: 0x%08X (%u)\n", audio_offset, audio_offset);
 
     // Copy audio
     uint8_t audio_buffer[4096];
@@ -397,6 +427,10 @@ int main(int argc, char **argv) {
     }
     fclose(audio_fp);
     printf("🔊 Copied %zu bytes of audio\n", audio_bytes_copied);
+    
+    // Optional: Pad final file to 2048-byte boundary
+    // printf("📐 Aligning final file size...\n");
+    // pad_to_alignment(out, 2048);
 
     // Write header
     fseek(out, 0, SEEK_SET);
