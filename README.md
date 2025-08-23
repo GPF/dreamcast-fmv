@@ -3,7 +3,7 @@
 This is a proof-of-concept FMV (Full Motion Video) playback toolchain for the Sega Dreamcast.
 It includes:
 
-* `pack_dcmv`: a frame+audio packer using lz4 HClevel 12 compression
+* `pack_dcmv`: a frame+audio packer using lz4 HClevel 12 , or zstd level 13 compression
 * `fmv_play.elf`: a Dreamcast player that decompresses and displays the video while streaming synced ADPCM audio
 * conversion tools using ffmpeg + `pvrtex` + `dcaconv`
 
@@ -35,6 +35,7 @@ It includes:
 * **pvrtex**: builds VQ-compressed RGB565 Dreamcast textures (from KOS utils folder)
 * **dcaconv**: encodes WAV audio to Dreamcast ADPCM format ([https://github.com/TapamN/dcaconv](https://github.com/TapamN/dcaconv))
 * **lz4**: used for lz4 compression [([https://github.com/GPF/lz4](https://github.com/GPF/lz4))](https://github.com/GPF/lz4)
+* **zstd**: used for zstd compression [([https://github.com/GPF/zstd](https://github.com/GPF/zstd))](https://github.com/GPF/zstd)
 
 ## Usage
 
@@ -61,6 +62,24 @@ Troy E. Davis ([@GPF](https://github.com/GPF)) – Dreamcast homebrew hacker, QA
 ---
 
 🎥 Screenshots and sample clips coming soon!
+
+
+
+https://github.com/user-attachments/assets/60f02ab9-aaa7-48cc-96fd-22c802bc4e7f
+
+📦 Header v6: YUV422 640x480 (content: 640x480) @ 23.97fps, 44100Hz, 2ch, unique=1039, total=1225
+   Frame size: 78848, Max compressed: 60789, Audio offset: 0x2B32AD6, Compression: LZ4
+vid_set_mode: 640x480 VGA with 1 framebuffers.
+🔄 Loading initial frames synchronously...
+✅ Starting playback @ 41.72ms/frame, total=1225, unique=1039
+🏁 Playback finished
+
+arch: exit return code 0
+arch: shutting down kernel
+vid_set_mode: 640x480 VGA with 1 framebuffers.
+gpf@GPF:~/code/dreamcast/dreamcast-fmv/playdcmv$ ls -la movie.dcmv 
+-rw-r--r-- 1 gpf gpf 47618230 Aug 22 20:33 movie.dcmv
+gpf@GPF:~/code/dreamcast/dreamcast-fmv/playdcmv$
 
 ![image](https://github.com/user-attachments/assets/6e24fbb8-2f86-4c95-a097-b26e14f6b521)
 
