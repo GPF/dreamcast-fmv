@@ -23,7 +23,7 @@ SKIP_IF_EXISTS=true
 # INPUT="input/lair.ogv"
 # INPUT="input/lair.m2v" # Example for other video
 # AUDIOINPUT="input/lair.ogg" # Example for audio input
-INPUT="input/Dreamcast Startup (60fps).mp4"
+INPUT="input/dolby-atmos-trailer_amaze_1080.mp4"
 AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
@@ -31,7 +31,7 @@ TEMP_DIR="temp_frames"
 FINAL_OUTPUT="./playdcmv/movie.dcmv"
 
 # Video Settings
-FPS=59.94
+FPS=23.97
 FORMAT="yuv422" # Options: rgb565, yuv422
 USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 

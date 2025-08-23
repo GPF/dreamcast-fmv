@@ -20,6 +20,7 @@ It includes:
 ├── dcaconv                     # ADPCM encoder (built from TapamN's dcaconv repo)
 ├── pack_dcmv.c                 # Source for video+audio packer
 ├── pack_dcmv                   # Compiled binary (use: `gcc -O2 pack_dcmv.c -o pack_dcmv -llz4 -lzstd`)
+├── generate_durations.py       # python3 script with PIL and ImageChops, numpy to find similiar png exported from ffmpeg and generate a repeat count of same frame to reduce size of dcmv file.
 ├── input/
 │   └── Your source .mp4 files (manually configured in convert_to_pvr_fmv.sh)
 ├── playdcmv/
@@ -31,11 +32,12 @@ It includes:
 
 ## Dependencies
 
-* **ffmpeg**: used to extract YUV frames and audio from MP4
-* **pvrtex**: builds VQ-compressed RGB565 Dreamcast textures (from KOS utils folder)
+* **ffmpeg**: used to extract RGB64be png frames and audio from video files.
+* **pvrtex**: builds VQ-compressed YUV422/RGB565 Dreamcast textures (from KOS utils folder)
+* **python3**:  python3 script with PIL and ImageChops, numpy to find similiar png exported from ffmpeg and generate a repeat count of same frame to reduce size of dcmv file.
 * **dcaconv**: encodes WAV audio to Dreamcast ADPCM format ([https://github.com/TapamN/dcaconv](https://github.com/TapamN/dcaconv))
-* **lz4**: used for lz4 compression [([https://github.com/GPF/lz4](https://github.com/GPF/lz4))](https://github.com/GPF/lz4)
-* **zstd**: used for zstd compression [([https://github.com/GPF/zstd](https://github.com/GPF/zstd))](https://github.com/GPF/zstd)
+* **lz4**: used for lz4 compression [([https://github.com/GPF/lz4](https://github.com/GPF/lz4))](https://github.com/GPF/lz4) //for speed over size.
+* **zstd**: used for zstd compression [([https://github.com/GPF/zstd](https://github.com/GPF/zstd))](https://github.com/GPF/zstd) //for size over speed.
 
 ## Usage
 
@@ -43,7 +45,7 @@ It includes:
 
    * Set the input video path (e.g., `input/Dreamcast Startup (60fps).mp4`) 
    ([https://archive.org/details/dreamcaststartup60fps])
-   * Adjust parameters like width, height, FPS, sample rate, channels, and audio bitrate
+   * Adjust parameters like width, height, scalewidth, scaleheight, strided/pot texture size, FPS, compression type(lz4 or zstd),remove similiar frames, sample rate, channels, and audio bitrate
 2. Run the script:
 
    ```bash
