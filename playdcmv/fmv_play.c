@@ -281,8 +281,8 @@ static int init_pvr(int frame_type) {
     pvr_poly_cxt_t cxt;
     if (use_strided) {
         int txr_format = (frame_type == 1)
-            ? PVR_TXRFMT_YUV422 | PVR_TXRFMT_VQ_ENABLE | PVR_TXRFMT_NONTWIDDLED | PVR_TXRFMT_X32_STRIDE
-            : PVR_TXRFMT_RGB565 | PVR_TXRFMT_VQ_ENABLE | PVR_TXRFMT_NONTWIDDLED | PVR_TXRFMT_X32_STRIDE;
+            ? PVR_TXRFMT_YUV422 | PVR_TXRFMT_VQ_ENABLE | (1 << 25) | PVR_TXRFMT_NONTWIDDLED
+            : PVR_TXRFMT_RGB565 | PVR_TXRFMT_VQ_ENABLE | (1 << 25) | PVR_TXRFMT_NONTWIDDLED;
 
         int pot_width = 1, pot_height = 1;
         while (pot_width < video_width) pot_width <<= 1;
@@ -291,8 +291,8 @@ static int init_pvr(int frame_type) {
         pvr_poly_cxt_txr(&cxt, PVR_LIST_OP_POLY, txr_format,
                          pot_width, pot_height, pvr_txr, PVR_FILTER_NEAREST);
         pvr_poly_compile(&hdr, &cxt);
-        // PVR_SET(PVR_TEXTURE_MODULO, (video_width / 32));
-        pvr_txr_set_stride(video_width);
+        PVR_SET(PVR_TEXTURE_MODULO, (video_width / 32));
+        // pvr_txr_set_stride(video_width);
 
         int display_width = (video_width == 320) ? 320 : 640;
         int display_height = (video_width == 320) ? 240 : 480;
@@ -453,7 +453,7 @@ static void wait_exit(void) {
     if (!dev) return;
 
     cont_state_t *state = (cont_state_t *)maple_dev_status(dev);
-    if (!state || !dev->status_valid) return;
+    if (!state ) return;
 
     if (state->buttons == prev_buttons) return;
     prev_buttons = state->buttons;

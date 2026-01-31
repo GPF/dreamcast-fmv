@@ -143,11 +143,15 @@ size_t load_frame_data(const char* filename, uint8_t* buffer, size_t buffer_size
 // Function to get actual texture data size (without DT header)
 size_t get_texture_data_size(const char* filename) {
     FILE *fp = fopen(filename, "rb");
-    if (!fp) return 0;
+    if (!fp) {
+        printf("❌ ERROR: Could not open file: %s\n", filename);
+        return 0;
+    }
 
     uint8_t header_buf[32];
     size_t header_read = fread(header_buf, 1, sizeof(header_buf), fp);
     if (header_read < sizeof(header_buf)) {
+        printf("❌ ERROR: Could not read header from: %s (read %zu bytes)\n", filename, header_read);
         fclose(fp);
         return 0;
     }
@@ -156,15 +160,21 @@ size_t get_texture_data_size(const char* filename) {
     if (memcmp(header_buf, DT_HEADER_MAGIC, 4) == 0) {
         uint8_t header_size = header_buf[9];
         skip = (header_size + 1) * 32;
+        printf("📏 DT Header found: header_size=%u (0x%02x), skip=%zu bytes\n", 
+               header_size, header_size, skip);
+    } else {
+        printf("📏 No DT header found\n");
     }
 
     fseek(fp, 0, SEEK_END);
     size_t total_size = ftell(fp);
     fclose(fp);
 
+    printf("📏 File: %s, Total size: %zu, Skip: %zu, Texture size: %zu\n", 
+           filename, total_size, skip, total_size - skip);
+    
     return total_size - skip;
 }
-
 // Load frame_durations.txt into durations array
 int load_durations(const char *path) {
     FILE *fp = fopen(path, "r");
@@ -292,7 +302,7 @@ int main(int argc, char **argv) {
     fseek(out, num_unique_frames * sizeof(uint16_t), SEEK_CUR);
 
     // ✅ Only align to 32 for frame data
-    // pad_to_alignment(out, 32);
+    pad_to_alignment(out, 32);
     offsets[0] = ftell(out);
 
     // Compress frames
@@ -343,6 +353,8 @@ int main(int argc, char **argv) {
         }
     }
     uint32_t max_compressed_size = 0;
+    uint64_t total_compressed_bytes = 0;
+    uint32_t min_compressed_size = 0xFFFFFFFF;
     printf("🗜️  Compressing unique frames...\n");
     size_t zstd_bound = 0;
     if (use_zstd) {
@@ -378,6 +390,9 @@ int main(int argc, char **argv) {
             fwrite(compressed_buf, 1, output.pos, out);
             if (output.pos > max_compressed_size)
                 max_compressed_size = output.pos;
+            total_compressed_bytes += output.pos;
+            if ((uint32_t)output.pos < min_compressed_size)
+                min_compressed_size = output.pos;
 
         } else {
             // LZ4 compression path
@@ -390,12 +405,15 @@ int main(int argc, char **argv) {
 
             fwrite(compressed_buf, 1, comp_size, out);
             if (comp_size > max_compressed_size) max_compressed_size = comp_size;
+            total_compressed_bytes += comp_size;
+            if ((uint32_t)comp_size < min_compressed_size)
+                min_compressed_size = comp_size;
         }
         
         // Set the offset for the NEXT frame BEFORE padding
         if (i < num_unique_frames - 1) {
             // Pad current frame to 32-byte boundary
-            // pad_to_alignment(out, 32);
+            pad_to_alignment(out, 32);
             // Now set the offset for the next frame
             offsets[i + 1] = ftell(out);
         }
@@ -406,10 +424,19 @@ int main(int argc, char **argv) {
         }
     }
     printf("\n");
+    double avg_compressed = (double)total_compressed_bytes / num_unique_frames;
+    double ratio = (double)total_compressed_bytes /
+                ((double)frame_size * num_unique_frames);
+
+    printf("📊 Compression stats:\n");
+    printf("   Min compressed frame: %u bytes\n", min_compressed_size);
+    printf("   Max compressed frame: %u bytes\n", max_compressed_size);
+    printf("   Avg compressed frame: %.1f bytes\n", avg_compressed);
+    printf("   Compression ratio:   %.2f%%\n", ratio * 100.0);
     
     // Pad to 2048-byte boundary before audio
     // printf("📐 Aligning audio to 2048-byte boundary...\n");
-    // pad_to_alignment(out, 2048);
+    pad_to_alignment(out, 2048);
     
     // Audio offset (now aligned)
     uint32_t audio_offset = ftell(out);
@@ -430,7 +457,7 @@ int main(int argc, char **argv) {
     
     // Optional: Pad final file to 2048-byte boundary
     // printf("📐 Aligning final file size...\n");
-    // pad_to_alignment(out, 2048);
+    pad_to_alignment(out, 2048);
 
     // Write header
     fseek(out, 0, SEEK_SET);

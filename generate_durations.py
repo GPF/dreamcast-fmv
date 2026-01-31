@@ -2,7 +2,7 @@
 """
 generate_durations.py
 ---------------------
-Analyzes a sequence of PNG frames with improved duplicate detection.
+Analyzes a sequence of TGA frames with improved duplicate detection.
 """
 
 import os
@@ -60,9 +60,9 @@ def difference_percentage_histogram(img1, img2):
     return total_diff * 100 / 3  # Average across channels
 
 def generate_durations(input_dir, output_dir, threshold=0.5):
-    frames = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(".png")])
+    frames = sorted([f for f in os.listdir(input_dir) if f.lower().endswith(".tga")])
     if not frames:
-        print(f"No PNG frames found in {input_dir}")
+        print(f"No TGA frames found in {input_dir}")
         sys.exit(1)
 
     # Use the improved v1 method by default (you can change this line to test others)
@@ -78,7 +78,7 @@ def generate_durations(input_dir, output_dir, threshold=0.5):
     first_frame_path = os.path.join(input_dir, frames[0])
     prev_frame = Image.open(first_frame_path).convert("RGB")
     durations.append(1)
-    unique_out_path = os.path.join(output_dir, f"frame{unique_count:05d}.png")
+    unique_out_path = os.path.join(output_dir, f"frame{unique_count:05d}.tga")
     shutil.copy2(first_frame_path, unique_out_path)
     unique_count += 1
 
@@ -100,7 +100,7 @@ def generate_durations(input_dir, output_dir, threshold=0.5):
             durations[-1] += 1
         else:
             durations.append(1)
-            unique_out_path = os.path.join(output_dir, f"frame{unique_count:05d}.png")
+            unique_out_path = os.path.join(output_dir, f"frame{unique_count:05d}.tga")
             shutil.copy2(current_path, unique_out_path)
             unique_count += 1
 

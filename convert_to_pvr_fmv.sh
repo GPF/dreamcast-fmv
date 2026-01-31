@@ -19,25 +19,22 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-# INPUT="input/cliff.ogv"
-# INPUT="input/lair.ogv"
-# INPUT="input/lair.m2v" # Example for other video
-# AUDIOINPUT="input/lair.ogg" # Example for audio input
-INPUT="input/dolby-atmos-trailer_amaze_1080.mp4"
-AUDIOINPUT=$INPUT
+AUDIOINPUT="input/dle.ogg" # Example for audio input
+INPUT="input/dle.m2v"
+# AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
 TEMP_DIR="temp_frames"
 FINAL_OUTPUT="./playdcmv/movie.dcmv"
 
 # Video Settings
-FPS=23.97
+FPS=23.98
 FORMAT="yuv422" # Options: rgb565, yuv422
 USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=640 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=480
+SCALE_WIDTH=320 # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT=240
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
@@ -46,14 +43,14 @@ SCALE_HEIGHT=480
 
 # Audio Settings
 AUDIO_RATE=44100
-CHANNELS=2
+CHANNELS=1
 
-USE_DEDUP=true  # Set to false to disable frame deduplication
+USE_DEDUP=false  # Set to false to disable frame deduplication
 COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
 
 if [ "$USE_STRIDED" = true ]; then
-    WIDTH=640 # Direct strided texture
-    HEIGHT=480
+    WIDTH=320 # Direct strided texture
+    HEIGHT=240
 else
     WIDTH=512 # POT texture with padding
     HEIGHT=256
@@ -74,7 +71,7 @@ USE_FFMPEG_DITHER=false # Best to let pvrtex handle dithering for final conversi
 PVRTX_DITHER=1 # 0 = no dithering, 1 = enable (recommended for RGB565 from pvrtex)
 
 # Intermediate file format
-INTERMEDIATE_FORMAT="png" # PNG is the most practical choice
+INTERMEDIATE_FORMAT="tga" # PNG is the most practical choice
 
 # ==================== END CONFIGURATION ====================
 
@@ -96,10 +93,10 @@ fi
 FFMPEG_PIX_FMT=""
 case "$FORMAT" in
     "rgb565")
-        FFMPEG_PIX_FMT="rgba64be"
+        FFMPEG_PIX_FMT="rgba48be"
         ;;
     "yuv422")
-        FFMPEG_PIX_FMT="rgba64be"
+        FFMPEG_PIX_FMT="rgba48be"
         ;;
     *)
         echo "Error: Invalid FORMAT specified. Use 'rgb565' or 'yuv422'."
@@ -191,9 +188,9 @@ process_rgb565() {
     build_ffmpeg_opts
 
     # Extract frames if not already extracted
-    if ! compgen -G "$TEMP_DIR/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
+    if ! compgen -G "$UNIQUE_FRAMES/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
         echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
-        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
+        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%06d.$INTERMEDIATE_FORMAT" || exit 1
     else
         echo "✅ Found extracted frames in $TEMP_DIR, skipping ffmpeg extraction."
     fi
@@ -208,12 +205,17 @@ process_rgb565() {
             python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" .5 || exit 1
         fi
     else
-        echo "🧱 Deduplication disabled. Copying frames and generating frame_durations.txt with all 1s..."
+        echo "🧱 Deduplication disabled. Copying frames safely and generating frame_durations.txt..."
+
         rm -rf "$UNIQUE_FRAMES"
         mkdir -p "$UNIQUE_FRAMES"
-        cp "$TEMP_DIR"/frame*."$INTERMEDIATE_FORMAT" "$UNIQUE_FRAMES"/
-        num_frames=$(ls "$UNIQUE_FRAMES" | grep -c "$INTERMEDIATE_FORMAT")
+
+        find "$TEMP_DIR" -name "frame*.${INTERMEDIATE_FORMAT}" -print0 \
+        | xargs -0 cp -t "$UNIQUE_FRAMES"
+
+        num_frames=$(find "$UNIQUE_FRAMES" -maxdepth 1 -name "frame*.${INTERMEDIATE_FORMAT}" | wc -l)
         yes 1 | head -n "$num_frames" > "$UNIQUE_FRAMES/frame_durations.txt"
+
     fi
 
     # Convert unique frames if no .dt files exist
@@ -234,7 +236,7 @@ process_rgb565() {
     else
         local frame_idx=0
         for intermediate_file in "$UNIQUE_FRAMES"/frame*.$INTERMEDIATE_FORMAT; do
-            local base=$(printf "frame%05d" "$frame_idx")
+            local base=$(printf "frame%06d" "$frame_idx")
             $PVRTX -i "$intermediate_file" -o "$OUTPUT_DIR/${base}.${EXT}" "${pvrtx_opts[@]}" $PVRTX_QUIET || exit 1
             ((frame_idx++))
         done
@@ -249,11 +251,12 @@ process_yuv422() {
     build_ffmpeg_opts
 
     # Extract frames if temp_frames is empty
-    if ! compgen -G "$TEMP_DIR/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
+    if ! compgen -G "$TEMP_DIR/frame*.$INTERMEDIATE_FORMAT" >/dev/null && \
+       ! compgen -G "$UNIQUE_FRAMES/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
         echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
-        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
+        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%06d.$INTERMEDIATE_FORMAT" || exit 1
     else
-        echo "✅ Found extracted frames in $TEMP_DIR, skipping ffmpeg extraction."
+        echo "✅ Found extracted frames, skipping ffmpeg extraction."
     fi
 
     # Deduplicate frames
@@ -263,15 +266,23 @@ process_yuv422() {
         else
             echo "🔍 Running frame deduplication..."
             rm -rf "$UNIQUE_FRAMES"
-            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" .1 || exit 1
+            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" .08 || exit 1
         fi
     else
-        echo "🧱 Deduplication disabled. Copying frames and generating frame_durations.txt with all 1s..."
-        rm -rf "$UNIQUE_FRAMES"
-        mkdir -p "$UNIQUE_FRAMES"
-        cp "$TEMP_DIR"/frame*."$INTERMEDIATE_FORMAT" "$UNIQUE_FRAMES"/
-        num_frames=$(ls "$UNIQUE_FRAMES" | grep -c "$INTERMEDIATE_FORMAT")
-        yes 1 | head -n "$num_frames" > "$UNIQUE_FRAMES/frame_durations.txt"
+        if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$UNIQUE_FRAMES/frame*.${INTERMEDIATE_FORMAT}" >/dev/null; then
+            echo "✅ Found frames in unique_frames, skipping move."
+        else
+            echo "🧱 Deduplication disabled. Moving frames and generating frame_durations.txt..."
+
+            rm -rf "$UNIQUE_FRAMES"
+            mkdir -p "$UNIQUE_FRAMES"
+
+            find "$TEMP_DIR" -name "frame*.${INTERMEDIATE_FORMAT}" -print0 \
+            | xargs -0 mv -t "$UNIQUE_FRAMES"
+
+            num_frames=$(find "$UNIQUE_FRAMES" -maxdepth 1 -name "frame*.${INTERMEDIATE_FORMAT}" | wc -l)
+            yes 1 | head -n "$num_frames" > "$UNIQUE_FRAMES/frame_durations.txt"
+        fi
     fi
 
     # Convert unique frames to VQ-compressed format
@@ -292,13 +303,12 @@ process_yuv422() {
     else
         local frame_idx=0
         for intermediate_file in "$UNIQUE_FRAMES"/frame*.$INTERMEDIATE_FORMAT; do
-            local base=$(printf "frame%05d" "$frame_idx")
+            local base=$(printf "frame%06d" "$frame_idx")
             $PVRTX -i "$intermediate_file" -o "$OUTPUT_DIR/${base}.${EXT}" "${pvrtx_opts[@]}" $PVRTX_QUIET || exit 1
             ((frame_idx++))
         done
     fi
 }
-
 
 # Main processing
 case "$FORMAT" in
@@ -322,14 +332,21 @@ if [ "$SKIP_IF_EXISTS" = true ] && [[ -f "$AUDIO_OUT" ]]; then
     echo "✅ Found existing audio.dca, skipping audio extraction."
 else
     echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
-    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
-    "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
-      -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
+    
+    # Test: Use FFmpeg's adpcm_yamaha with WAV format
+    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" \
+      -ac "$CHANNELS" -ar "$AUDIO_RATE" \
+      -c:a adpcm_yamaha -f wav -y "$AUDIO_OUT"
+    
+    # Original method (commented out for comparison)
+    # ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
+    # "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
+    #   -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
 fi
 
 echo "📦 Packing into compressed .dcmv format..."
 "$PACKER" "$FINAL_OUTPUT" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$SCALE_WIDTH" "$SCALE_HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
-  "$OUTPUT_DIR/frame%05d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" || exit 1
+  "$OUTPUT_DIR/frame%06d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" || exit 1
 
 
 # Clean up intermediate files
