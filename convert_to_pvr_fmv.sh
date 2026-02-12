@@ -19,9 +19,9 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-AUDIOINPUT="input/dle.ogg" # Example for audio input
-INPUT="input/dle.m2v"
-# AUDIOINPUT=$INPUT
+# AUDIOINPUT="input/dle.ogg" # Example for audio input
+INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4"
+AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
 TEMP_DIR="temp_frames"
@@ -33,8 +33,8 @@ FORMAT="yuv422" # Options: rgb565, yuv422
 USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=320 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=240
+SCALE_WIDTH=640 # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT=480
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
@@ -43,14 +43,15 @@ SCALE_HEIGHT=240
 
 # Audio Settings
 AUDIO_RATE=44100
-CHANNELS=1
+CHANNELS=2
 
 USE_DEDUP=false  # Set to false to disable frame deduplication
 COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
+CHUNK_DURATION="${CHUNK_DURATION:-2.0}"  # Default 2.0, override with env variable if needed
 
 if [ "$USE_STRIDED" = true ]; then
-    WIDTH=320 # Direct strided texture
-    HEIGHT=240
+    WIDTH=640 # Direct strided texture
+    HEIGHT=480
 else
     WIDTH=512 # POT texture with padding
     HEIGHT=256
@@ -71,7 +72,7 @@ USE_FFMPEG_DITHER=false # Best to let pvrtex handle dithering for final conversi
 PVRTX_DITHER=1 # 0 = no dithering, 1 = enable (recommended for RGB565 from pvrtex)
 
 # Intermediate file format
-INTERMEDIATE_FORMAT="tga" # PNG is the most practical choice
+INTERMEDIATE_FORMAT="tga" # TGA is the most practical choice
 
 # ==================== END CONFIGURATION ====================
 
@@ -89,7 +90,7 @@ else
     echo "📐 Using POT texture mode: ${WIDTH}x${HEIGHT} with ${SCALE_WIDTH}x${SCALE_HEIGHT} content (pad: ${PAD_X}x${PAD_Y})"
 fi
 
-# Determine FFmpeg pixel format for intermediate PNGs
+# Determine FFmpeg pixel format for intermediate TGAs
 FFMPEG_PIX_FMT=""
 case "$FORMAT" in
     "rgb565")
@@ -189,7 +190,7 @@ process_rgb565() {
 
     # Extract frames if not already extracted
     if ! compgen -G "$UNIQUE_FRAMES/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
-        echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
+        echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} TGAs..."
         ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%06d.$INTERMEDIATE_FORMAT" || exit 1
     else
         echo "✅ Found extracted frames in $TEMP_DIR, skipping ffmpeg extraction."
@@ -253,7 +254,7 @@ process_yuv422() {
     # Extract frames if temp_frames is empty
     if ! compgen -G "$TEMP_DIR/frame*.$INTERMEDIATE_FORMAT" >/dev/null && \
        ! compgen -G "$UNIQUE_FRAMES/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
-        echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
+        echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} TGAs..."
         ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%06d.$INTERMEDIATE_FORMAT" || exit 1
     else
         echo "✅ Found extracted frames, skipping ffmpeg extraction."
@@ -334,19 +335,19 @@ else
     echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
     
     # Test: Use FFmpeg's adpcm_yamaha with WAV format
-    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" \
-      -ac "$CHANNELS" -ar "$AUDIO_RATE" \
-      -c:a adpcm_yamaha -f wav -y "$AUDIO_OUT"
+    # ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" \
+    #   -ac "$CHANNELS" -ar "$AUDIO_RATE" \
+    #   -c:a adpcm_yamaha -f wav -y "$AUDIO_OUT"
     
     # Original method (commented out for comparison)
-    # ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
-    # "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
-    #   -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
+    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
+    "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
+      -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
 fi
 
 echo "📦 Packing into compressed .dcmv format..."
 "$PACKER" "$FINAL_OUTPUT" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$SCALE_WIDTH" "$SCALE_HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
-  "$OUTPUT_DIR/frame%06d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" || exit 1
+  "$OUTPUT_DIR/frame%06d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" "$CHUNK_DURATION" || exit 1
 
 
 # Clean up intermediate files
