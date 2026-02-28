@@ -19,7 +19,7 @@ It includes:
 ├── convert_to_pvr_fmv.sh       # Main conversion script (edit manually to configure input)
 ├── dcaconv                     # ADPCM encoder (built from TapamN's dcaconv repo)
 ├── pack_dcmv.c                 # Source for video+audio packer
-├── pack_dcmv                   # Compiled binary (use: `gcc -O2 pack_dcmv.c -o pack_dcmv -llz4 -lzstd`)
+├── pack_dcmv                   # Compiled binary (use: `gcc -O2 pack_dcmv.c -o pack_dcmv -llz4 -lzstd -lm`)
 ├── generate_durations.py       # python3 script with PIL and ImageChops, numpy to find similiar png exported from ffmpeg and generate a repeat count of same frame to reduce size of dcmv file.
 ├── input/
 │   └── Your source .mp4 files (manually configured in convert_to_pvr_fmv.sh)

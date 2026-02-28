@@ -78,7 +78,7 @@ def generate_durations(input_dir, output_dir, threshold=0.5):
     first_frame_path = os.path.join(input_dir, frames[0])
     prev_frame = Image.open(first_frame_path).convert("RGB")
     durations.append(1)
-    unique_out_path = os.path.join(output_dir, f"frame{unique_count:05d}.tga")
+    unique_out_path = os.path.join(output_dir, f"frame{unique_count:06d}.tga")
     shutil.copy2(first_frame_path, unique_out_path)
     unique_count += 1
 
@@ -100,7 +100,7 @@ def generate_durations(input_dir, output_dir, threshold=0.5):
             durations[-1] += 1
         else:
             durations.append(1)
-            unique_out_path = os.path.join(output_dir, f"frame{unique_count:05d}.tga")
+            unique_out_path = os.path.join(output_dir, f"frame{unique_count:06d}.tga")
             shutil.copy2(current_path, unique_out_path)
             unique_count += 1
 
