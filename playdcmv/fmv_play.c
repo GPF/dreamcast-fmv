@@ -12,15 +12,23 @@
 
 #include <kos.h>
 #include <kos/dbgio.h>
+
 #include <dc/sound/stream.h>
 #include <dc/sound/sound.h>
 #include <dc/pvr.h>
 #include <dc/maple/controller.h>
+#include <dc/sq.h>          // sq_fast_cpy
+
 #include <arch/timer.h>
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
+#include <stdint.h>
+#include <malloc.h>
+#include <fcntl.h>
+
 #include <lz4/lz4.h>
 
 #define ZSTD_STATIC_LINKING_ONLY
@@ -30,19 +38,26 @@
 // Tunables
 // =============================================================================
 
-#define NUM_BUFFERS              30
-#define CHUNK_CACHE_SIZE         8
-#define ACTIVE_CHUNK_CACHE_SLOTS 8
-#define DECODE_THREADS           2
+#define NUM_BUFFERS              16
+#define CHUNK_CACHE_SIZE         4
+#define ACTIVE_CHUNK_CACHE_SLOTS 4
+#define DECODE_THREADS           3
 #define DECODE_Q_CAP             64
 #define AUDIO_BUFFER_SIZE        4096   // bytes per channel per ring slot
-#define AUDIO_RING_SIZE          48
+#define AUDIO_RING_SIZE          24
 #define TARGET_AUDIO_BUFFER_MS   700.0
 #define PREFETCH_AHEAD           (NUM_BUFFERS - 3)
+#define PREFETCH_BOUNDARY_FRAMES 4
 #define INITIAL_PRELOAD          NUM_BUFFERS
-#define CHUNK_IO_SLICE           (32 * 1024)
+#define CHUNK_IO_SLICE           (128 * 1024)
 #define PROF_PRINT_EVERY_MS      1000.0
 #define ADPCM_BYTES_PER_SAMPLE   0.5   // 4-bit: 0.5 bytes/sample/channel
+
+// Worker wakes at least every WORKER_POLL_MS even without an explicit signal.
+// This ensures the ring stays full during smooth playback where no underrun
+// fires, and catches the case where refill filled fewer slots than needed
+// because the next audio chunk wasn't cached yet.
+#define WORKER_POLL_MS           5
 
 #define MIN(a,b) ((a)<(b)?(a):(b))
 #define MAX(a,b) ((a)>(b)?(a):(b))
@@ -120,7 +135,6 @@ static void prof_init(ThreadProf *p, const char *name) {
     *p = (ThreadProf){ .name = name, .last_print_ms = psTimer() };
 }
 
-// Pass actual work_ms / idle_ms spent this loop iteration.
 static void prof_tick(ThreadProf *p, double work_ms, double idle_ms) {
     p->work_ms += work_ms;
     p->idle_ms += idle_ms;
@@ -135,110 +149,6 @@ static void prof_tick(ThreadProf *p, double work_ms, double idle_ms) {
     p->work_ms = p->idle_ms = 0.0;
     p->loops = p->c0 = p->c1 = 0;
     p->last_print_ms = now;
-}
-
-// =============================================================================
-// PVR / video state
-// =============================================================================
-
-static pvr_ptr_t      pvr_txr;
-static pvr_poly_hdr_t poly_hdr;
-static pvr_vertex_t   vert[4];
-
-enum BufState { BUF_EMPTY=0, BUF_QUEUED=1, BUF_LOADING=2, BUF_READY=3 };
-
-static uint8_t    *frame_buffer[NUM_BUFFERS];
-static _Atomic int buf_state[NUM_BUFFERS];
-static _Atomic int buf_total_frame[NUM_BUFFERS];
-static _Atomic int buf_unique_id[NUM_BUFFERS];
-
-static atomic_int  frame_index       = 0;
-static atomic_int  audio_muted       = 1;
-static _Atomic int playback_started  = 0;
-
-static _Atomic double playback_t0_ms  = 0.0;
-static double         frame_duration  = 0.0;
-static int            last_unique_frame_drawn = -1;
-static int            pending_free_buf        = -1;
-
-// =============================================================================
-// File / codec globals
-// =============================================================================
-
-static file_t     video_fd        = -1;
-static ZSTD_DCtx *dctx            = NULL;
-static uint32_t  *frame_sizes     = NULL;  // (num_unique_frames+1) u32; low 29b = size
-static uint16_t  *frame_durations = NULL;  // num_unique_frames u16
-static uint16_t  *t2u_lut         = NULL;  // num_total_frames  u16
-
-static snd_stream_hnd_t stream;
-
-// =============================================================================
-// Audio ring buffer
-// =============================================================================
-
-typedef struct {
-    uint8_t    left [AUDIO_BUFFER_SIZE] __attribute__((aligned(32)));
-    uint8_t    right[AUDIO_BUFFER_SIZE] __attribute__((aligned(32)));
-    size_t     valid_bytes;  // per-channel, rounded up to 32
-    _Atomic int valid;       // 1 = slot ready
-} AudioSlot;
-
-static AudioSlot   audio_ring[AUDIO_RING_SIZE] __attribute__((aligned(32)));
-static atomic_int  audio_write_idx     = 0;
-static atomic_int  audio_read_idx      = 0;
-static _Atomic int audio_refill_needed = 0;
-static size_t      g_audio_ring_read_pos = 0;
-
-static int    current_audio_chunk  = 0;
-static size_t audio_chunk_read_pos = 0;
-
-static inline double audio_entry_ms(void) {
-    return (1000.0 * AUDIO_BUFFER_SIZE) /
-           ((double)header.sample_rate * ADPCM_BYTES_PER_SAMPLE);
-}
-
-static inline int target_audio_buffers(void) {
-    int n = (int)((TARGET_AUDIO_BUFFER_MS + audio_entry_ms() - 1.0) / audio_entry_ms());
-    return MAX(4, MIN(n, AUDIO_RING_SIZE - 2));
-}
-
-// =============================================================================
-// Decode job queue (SPSC lock-free)
-// =============================================================================
-
-typedef struct {
-    int total_frame, unique_id, buf, generation;
-} DecodeJob;
-
-static DecodeJob   decode_q[DECODE_Q_CAP];
-static _Atomic int decode_q_head   = 0;
-static _Atomic int decode_q_tail   = 0;
-static _Atomic int GSeekGeneration = 0;
-
-static inline int q_inc(int x) { return (x + 1) % DECODE_Q_CAP; }
-
-static int decode_q_push(const DecodeJob *j) {
-    int head = atomic_load_explicit(&decode_q_head, memory_order_relaxed);
-    int next = q_inc(head);
-    if (next == atomic_load_explicit(&decode_q_tail, memory_order_acquire)) return 0;
-    decode_q[head] = *j;
-    atomic_store_explicit(&decode_q_head, next, memory_order_release);
-    return 1;
-}
-
-static int decode_q_pop(DecodeJob *out) {
-    int tail = atomic_load_explicit(&decode_q_tail, memory_order_relaxed);
-    if (tail == atomic_load_explicit(&decode_q_head, memory_order_acquire)) return 0;
-    *out = decode_q[tail];
-    atomic_store_explicit(&decode_q_tail, q_inc(tail), memory_order_release);
-    return 1;
-}
-
-static void decode_q_flush(void) {
-    atomic_store_explicit(&decode_q_tail,
-        atomic_load_explicit(&decode_q_head, memory_order_acquire),
-        memory_order_release);
 }
 
 // =============================================================================
@@ -294,23 +204,164 @@ typedef struct {
     int      did_seek;
 } ChunkIOJob;
 
-static mutex_t    io_mutex  = MUTEX_INITIALIZER;
-static ChunkIOJob io_job    = {0};
-// .cur_off = e->chunk_offset,
-// .did_seek = 0,
-static _Atomic int io_wake   = 0;
+static mutex_t    io_mutex    = MUTEX_INITIALIZER;
+static ChunkIOJob io_job      = {0};
 static _Atomic int io_enabled = 0;
 
+// =============================================================================
+// genwait-based wake signals (avoid thd_sleep polling)
+// =============================================================================
+
+static _Atomic uint32_t decode_wake_seq = 0;
+static _Atomic uint32_t worker_wake_seq = 0;
+static _Atomic uint32_t io_wake_seq     = 0;
+
+static inline void wait_on_seq(_Atomic uint32_t *seq_atomic, uint32_t *last_seen, int timeout_ms) {
+    while (atomic_load_explicit(seq_atomic, memory_order_acquire) == *last_seen) {
+        genwait_wait((void*)seq_atomic, NULL, timeout_ms);
+        if (timeout_ms > 0) break;
+    }
+    *last_seen = atomic_load_explicit(seq_atomic, memory_order_acquire);
+}
+
+static inline void decode_signal(void) {
+    atomic_fetch_add_explicit(&decode_wake_seq, 1, memory_order_release);
+    genwait_wake_one((void*)&decode_wake_seq);
+}
+
+static inline void worker_signal(void) {
+    atomic_fetch_add_explicit(&worker_wake_seq, 1, memory_order_release);
+    genwait_wake_one((void*)&worker_wake_seq);
+}
+
 static void io_signal(void) {
-    if (atomic_load_explicit(&io_enabled, memory_order_acquire))
-        atomic_store_explicit(&io_wake, 1, memory_order_release);
+    if (atomic_load_explicit(&io_enabled, memory_order_acquire)) {
+        atomic_fetch_add_explicit(&io_wake_seq, 1, memory_order_release);
+        genwait_wake_one((void*)&io_wake_seq);
+    }
+}
+
+// =============================================================================
+// PVR / video state
+// =============================================================================
+
+static pvr_ptr_t      pvr_txr;
+static pvr_poly_hdr_t poly_hdr;
+static pvr_vertex_t   vert[4];
+
+enum BufState { BUF_EMPTY=0, BUF_QUEUED=1, BUF_LOADING=2, BUF_READY=3 };
+
+static uint8_t    *frame_buffer[NUM_BUFFERS];
+static _Atomic int buf_state[NUM_BUFFERS];
+static _Atomic int buf_total_frame[NUM_BUFFERS];
+static _Atomic int buf_unique_id[NUM_BUFFERS];
+
+static atomic_int  frame_index       = 0;
+static atomic_int  audio_muted       = 1;
+static _Atomic int playback_started  = 0;
+
+static _Atomic double playback_t0_ms  = 0.0;
+static double         frame_duration  = 0.0;
+static int            last_unique_frame_drawn = -1;
+static int            pending_free_buf        = -1;
+
+// =============================================================================
+// File / codec globals
+// =============================================================================
+
+static file_t     video_fd        = -1;
+static uint32_t  *frame_sizes     = NULL;
+static uint16_t  *frame_durations = NULL;
+static uint16_t  *t2u_lut         = NULL;
+
+static snd_stream_hnd_t stream;
+
+// =============================================================================
+// Zstd: per-thread DCtx (NOT thread-safe)
+// =============================================================================
+
+static ZSTD_DCtx *g_zstd_dctx[DECODE_THREADS] = {0};
+
+typedef struct {
+    int tid;   // 0..DECODE_THREADS-1
+} DecodeThreadArg;
+
+static DecodeThreadArg g_decode_args[DECODE_THREADS];
+
+// =============================================================================
+// Audio ring buffer
+// =============================================================================
+
+typedef struct {
+    uint8_t    left [AUDIO_BUFFER_SIZE] __attribute__((aligned(32)));
+    uint8_t    right[AUDIO_BUFFER_SIZE] __attribute__((aligned(32)));
+    size_t     valid_bytes;     // bytes PER CHANNEL
+    _Atomic int valid;
+} AudioSlot;
+
+static AudioSlot   audio_ring[AUDIO_RING_SIZE] __attribute__((aligned(32)));
+static atomic_int  audio_write_idx     = 0;
+static atomic_int  audio_read_idx      = 0;
+static _Atomic int audio_refill_needed = 0;
+static size_t      g_audio_ring_read_pos = 0;
+
+static int    current_audio_chunk  = 0;
+static size_t audio_chunk_read_pos = 0;
+
+static inline double audio_entry_ms(void) {
+    return (1000.0 * (double)AUDIO_BUFFER_SIZE) /
+           ((double)header.sample_rate * ADPCM_BYTES_PER_SAMPLE);
+}
+
+static inline int target_audio_buffers(void) {
+    int n = (int)((TARGET_AUDIO_BUFFER_MS + audio_entry_ms() - 1.0) / audio_entry_ms());
+    return MAX(4, MIN(n, AUDIO_RING_SIZE - 2));
+}
+
+// =============================================================================
+// Decode job queue (SPSC lock-free)
+// =============================================================================
+
+typedef struct {
+    int total_frame, unique_id, buf, generation;
+} DecodeJob;
+
+static DecodeJob   decode_q[DECODE_Q_CAP];
+static _Atomic int decode_q_head   = 0;
+static _Atomic int decode_q_tail   = 0;
+static _Atomic int GSeekGeneration = 0;
+
+static inline int q_inc(int x) { return (x + 1) % DECODE_Q_CAP; }
+
+static int decode_q_push(const DecodeJob *j) {
+    int head = atomic_load_explicit(&decode_q_head, memory_order_relaxed);
+    int next = q_inc(head);
+    if (next == atomic_load_explicit(&decode_q_tail, memory_order_acquire)) return 0;
+    decode_q[head] = *j;
+    atomic_store_explicit(&decode_q_head, next, memory_order_release);
+    decode_signal();
+    return 1;
+}
+
+static int decode_q_pop(DecodeJob *out) {
+    int tail = atomic_load_explicit(&decode_q_tail, memory_order_relaxed);
+    if (tail == atomic_load_explicit(&decode_q_head, memory_order_acquire)) return 0;
+    *out = decode_q[tail];
+    atomic_store_explicit(&decode_q_tail, q_inc(tail), memory_order_release);
+    return 1;
+}
+
+static void decode_q_flush(void) {
+    atomic_store_explicit(&decode_q_tail,
+        atomic_load_explicit(&decode_q_head, memory_order_acquire),
+        memory_order_release);
 }
 
 // =============================================================================
 // Utility
 // =============================================================================
 
-static inline uint32_t align32(uint32_t x)       { return (x + 31u) & ~31u; }
+static inline uint32_t align32(uint32_t x)        { return (x + 31u) & ~31u; }
 static inline uint32_t pad32_after(uint32_t end)  { return (32u - (end & 31u)) & 31u; }
 static inline uint32_t frame_comp_size(uint32_t u){ return frame_sizes[u] & 0x1FFFFFFFu; }
 
@@ -321,7 +372,6 @@ static inline int total_to_unique(int tf) {
     return (int)t2u_lut[tf];
 }
 
-// Binary search — O(log n) even for large chunk counts
 static int find_chunk_for_frame(int tf) {
     if (!chunk_index || !header.num_chunks) return 0;
     tf = MAX(0, MIN(tf, (int)header.num_total_frames - 1));
@@ -330,7 +380,7 @@ static int find_chunk_for_frame(int tf) {
         int mid = (lo + hi) / 2;
         uint32_t s = chunk_index[mid].start_frame;
         uint32_t n = chunk_index[mid].num_frames;
-        if ((uint32_t)tf < s)        hi = mid - 1;
+        if ((uint32_t)tf < s)         hi = mid - 1;
         else if ((uint32_t)tf >= s+n) lo = mid + 1;
         else                          return mid;
     }
@@ -362,15 +412,12 @@ static void cache_release(ChunkCache *c) {
     if (c) atomic_fetch_sub_explicit(&c->refs, 1, memory_order_acq_rel);
 }
 
-// Must be called with chunk_cache_mutex held.
 static ChunkCache *evict_slot(int pin0, int pin1, int pin2) {
-    // Prefer an already-empty slot
     for (int i = 0; i < CHUNK_CACHE_SIZE; i++) {
         if (chunk_cache[i].data &&
             atomic_load_explicit(&chunk_cache[i].valid, memory_order_relaxed) == CHUNK_EMPTY)
             return &chunk_cache[i];
     }
-    // LRU eviction among unpinned, unreferenced, ready slots
     int lru = -1; uint32_t best = 0xFFFFFFFFu;
     for (int i = 0; i < CHUNK_CACHE_SIZE; i++) {
         if (!chunk_cache[i].data) continue;
@@ -390,7 +437,7 @@ static ChunkCache *evict_slot(int pin0, int pin1, int pin2) {
 }
 
 // =============================================================================
-// Per-chunk frame map  (auto-detects raw vs 32B-aligned packer layout)
+// Per-chunk frame map
 // =============================================================================
 
 static void build_chunk_frame_map(ChunkCache *slot, int chunk_id) {
@@ -398,7 +445,6 @@ static void build_chunk_frame_map(ChunkCache *slot, int chunk_id) {
     uint32_t n    = MIN(e->num_frames, slot->map_cap);
     uint32_t seen_cap = MIN(slot->seen_cap, n);
 
-    // Probe both layouts to pick whichever total fits video_bytes_size better
     uint32_t cur_raw = 0, cur_aln = 0, seen_cnt = 0;
     for (uint32_t j = 0; j < n; j++) {
         int uf = total_to_unique((int)e->start_frame + (int)j);
@@ -426,7 +472,6 @@ static void build_chunk_frame_map(ChunkCache *slot, int chunk_id) {
         use_aligned = (ad < rd) ? 1 : 0;
     }
 
-    // Build the actual map with dedup tracking
     seen_cnt = 0;
     uint32_t cur_off = 0;
     for (uint32_t j = 0; j < n; j++) {
@@ -461,7 +506,7 @@ static uint32_t max_chunk_disk_bytes(void) {
     for (uint32_t i = 0; i < header.num_chunks; i++) {
         ChunkEntry *e = &chunk_index[i];
         uint32_t v = e->video_section_size + pad32_after(e->chunk_offset + e->video_section_size);
-        uint32_t a = e->audio_size * (uint32_t)header.channels;
+        uint32_t a = align32(e->audio_size) * (uint32_t)header.channels;
         mx = MAX(mx, v + a);
     }
     return align32(mx + 64);
@@ -484,8 +529,8 @@ static int init_chunk_cache(void) {
             free(chunk_cache[i].data);            chunk_cache[i].data            = NULL;
             free(chunk_cache[i].frame_off_local); chunk_cache[i].frame_off_local = NULL;
             free(chunk_cache[i].frame_sz_local);  chunk_cache[i].frame_sz_local  = NULL;
-            free(chunk_cache[i].seen_u);           chunk_cache[i].seen_u          = NULL;
-            free(chunk_cache[i].seen_off);         chunk_cache[i].seen_off        = NULL;
+            free(chunk_cache[i].seen_u);          chunk_cache[i].seen_u          = NULL;
+            free(chunk_cache[i].seen_off);        chunk_cache[i].seen_off        = NULL;
             chunk_cache[i].seen_cap = chunk_cache[i].map_cap = 0;
             chunk_cache[i].chunk_id = -1; chunk_cache[i].size = 0;
             atomic_store(&chunk_cache[i].valid, CHUNK_EMPTY);
@@ -520,9 +565,9 @@ static int init_chunk_cache(void) {
             chunk_cache[i].seen_cap = want_seen;
         }
 
-        chunk_cache[i].size     = max_chunk;
-        chunk_cache[i].map_cap  = map_cap;
-        chunk_cache[i].chunk_id = -1;
+        chunk_cache[i].size      = max_chunk;
+        chunk_cache[i].map_cap   = map_cap;
+        chunk_cache[i].chunk_id  = -1;
         chunk_cache[i].last_used = 0;
         chunk_cache[i].video_section = chunk_cache[i].audio_L = chunk_cache[i].audio_R = NULL;
         chunk_cache[i].video_bytes_size = 0;
@@ -533,20 +578,25 @@ static int init_chunk_cache(void) {
 }
 
 // =============================================================================
-// Chunk finalisation (called once a slot is fully loaded)
+// Chunk finalisation
 // =============================================================================
 
 static void chunk_finalise(ChunkCache *slot, int chunk_id,
-                            uint32_t video_real, uint32_t video_disk) {
+                           uint32_t video_real, uint32_t video_disk) {
     ChunkEntry *e          = &chunk_index[chunk_id];
     slot->chunk_id         = chunk_id;
     slot->video_section    = slot->data;
     slot->video_bytes_size = video_real;
+
+    uint32_t aud_disk_per_ch = align32(e->audio_size);
+
     slot->audio_L          = slot->data + video_disk;
-    slot->audio_R          = (header.channels == 2) ? slot->audio_L + e->audio_size : NULL;
+    slot->audio_R          = (header.channels == 2) ? (slot->audio_L + aud_disk_per_ch) : NULL;
+
     slot->last_used        = ++global_cache_tick;
     build_chunk_frame_map(slot, chunk_id);
     atomic_store_explicit(&slot->valid, CHUNK_READY, memory_order_release);
+    worker_signal();
 }
 
 // =============================================================================
@@ -569,7 +619,6 @@ static int request_chunk_async(int chunk_id, int pin0, int pin1, int pin2) {
     }
     mutex_unlock(&chunk_cache_mutex);
 
-    // Already loading?
     mutex_lock(&io_mutex);
     if (io_job.state == IO_LOADING && io_job.chunk_id == chunk_id)
         { mutex_unlock(&io_mutex); return 0; }
@@ -579,9 +628,12 @@ static int request_chunk_async(int chunk_id, int pin0, int pin1, int pin2) {
     mutex_lock(&chunk_cache_mutex);
     ChunkCache *slot = evict_slot(pin0, pin1, pin2);
     if (!slot) { mutex_unlock(&chunk_cache_mutex); mutex_unlock(&io_mutex); return -1; }
+
+    // IMPORTANT: mark slot as "belongs to chunk_id" while LOADING so
+    // is_cached_or_loading() can suppress duplicate requests.
+    slot->chunk_id = chunk_id;
     atomic_store_explicit(&slot->valid, CHUNK_LOADING, memory_order_release);
     atomic_store_explicit(&slot->refs,  0,             memory_order_release);
-    slot->chunk_id = -1;
     slot->video_section = slot->audio_L = slot->audio_R = NULL;
     slot->video_bytes_size = 0;
     mutex_unlock(&chunk_cache_mutex);
@@ -589,13 +641,14 @@ static int request_chunk_async(int chunk_id, int pin0, int pin1, int pin2) {
     ChunkEntry *e     = &chunk_index[chunk_id];
     uint32_t vid_real = e->video_section_size;
     uint32_t vid_disk = vid_real + pad32_after(e->chunk_offset + vid_real);
-    uint32_t aud_disk = e->audio_size * (uint32_t)header.channels;
+    uint32_t aud_disk = align32(e->audio_size) * header.channels;
     uint32_t total    = vid_disk + aud_disk;
 
     if (total > slot->size) {
         printf("❌ [io] chunk %d needs %u, slot has %u\n", chunk_id, total, slot->size);
         mutex_lock(&chunk_cache_mutex);
         atomic_store_explicit(&slot->valid, CHUNK_EMPTY, memory_order_release);
+        slot->chunk_id = -1;
         mutex_unlock(&chunk_cache_mutex);
         mutex_unlock(&io_mutex);
         return -1;
@@ -605,8 +658,8 @@ static int request_chunk_async(int chunk_id, int pin0, int pin1, int pin2) {
         .state = IO_LOADING, .chunk_id = chunk_id,
         .pin0 = pin0, .pin1 = pin1, .pin2 = pin2, .slot = slot,
         .file_off = e->chunk_offset, .total_bytes = total,
+        .progress = 0,
         .video_real_bytes = vid_real, .video_disk_bytes = vid_disk, .audio_disk_bytes = aud_disk,
-
         .cur_off = e->chunk_offset,
         .did_seek = 0,
     };
@@ -615,52 +668,66 @@ static int request_chunk_async(int chunk_id, int pin0, int pin1, int pin2) {
     return 0;
 }
 
+static int is_cached_or_loading(int chunk_id) {
+    // Cached or "reserved for load"?
+    mutex_lock(&chunk_cache_mutex);
+    for (int i = 0; i < CHUNK_CACHE_SIZE; i++) {
+        if (!chunk_cache[i].data) continue;
+        if (chunk_cache[i].chunk_id != chunk_id) continue;
+        int v = atomic_load_explicit(&chunk_cache[i].valid, memory_order_acquire);
+        if (v == CHUNK_READY || v == CHUNK_LOADING) {
+            mutex_unlock(&chunk_cache_mutex);
+            return 1;
+        }
+    }
+    mutex_unlock(&chunk_cache_mutex);
+
+    mutex_lock(&io_mutex);
+    int loading = (io_job.state == IO_LOADING && io_job.chunk_id == chunk_id);
+    mutex_unlock(&io_mutex);
+    return loading;
+}
+
 static void prefetch_around(int play_chunk) {
-    int aud = current_audio_chunk;
+    int aud  = current_audio_chunk;
+    int pin0 = aud, pin1 = play_chunk, pin2 = play_chunk + 1;
 
-    // Build a small set of pinned chunks (avoid duplicates)
-    int pin[3] = { aud, play_chunk, play_chunk + 1 };
+    int want[10];
+    int n = 0;
 
-    // Only prefetch what we can hold.
-    // With ACTIVE_CHUNK_CACHE_SLOTS=4 and 3 pins -> 1 extra chunk is safe.
-    int extras = MAX(0, ACTIVE_CHUNK_CACHE_SLOTS - 3);
+    if ((uint32_t)aud < header.num_chunks) want[n++] = aud;
+    if ((uint32_t)(aud + 1) < header.num_chunks) want[n++] = aud + 1;
 
-    // Always try to ensure pinned chunks are present
-    for (int i = 0; i < 3; i++) {
-        if ((uint32_t)pin[i] < header.num_chunks)
-            request_chunk_async(pin[i], pin[0], pin[1], pin[2]);
+    int runway = MAX(1, ACTIVE_CHUNK_CACHE_SLOTS - 2);
+    for (int k = 0; k <= runway && n < (int)(sizeof(want)/sizeof(want[0])); k++) {
+        int c = play_chunk + k;
+        if ((uint32_t)c < header.num_chunks) want[n++] = c;
     }
 
-    // Prefetch just a small runway
-    for (int k = 1; k <= extras; k++) {
-        int c = play_chunk + 1 + k;
-        if ((uint32_t)c < header.num_chunks)
-            request_chunk_async(c, pin[0], pin[1], pin[2]);
+    for (int i = 0; i < n; i++) {
+        if (!is_cached_or_loading(want[i]))
+            request_chunk_async(want[i], pin0, pin1, pin2);
     }
 }
 
 static void io_pump_slice(void) {
     mutex_lock(&io_mutex);
     if (io_job.state != IO_LOADING) { mutex_unlock(&io_mutex); return; }
-    ChunkIOJob job = io_job; // local copy so we don't hold io_mutex during IO
+    ChunkIOJob job = io_job;
     mutex_unlock(&io_mutex);
 
     uint32_t remaining = job.total_bytes - job.progress;
     if (!remaining) return;
 
-    uint32_t slice = MIN(remaining, (uint32_t)CHUNK_IO_SLICE) & ~31u;
-    if (!slice) slice = remaining;
+    uint32_t slice = MIN(remaining, (uint32_t)CHUNK_IO_SLICE);
+    if (slice >= 32) slice &= ~31u; // keep big slices aligned
 
     mutex_lock(&file_mutex);
-
-    // Seek ONCE, then read sequentially from current offset
     if (!job.did_seek) {
         fs_seek(video_fd, job.cur_off, SEEK_SET);
         job.did_seek = 1;
     }
-
     ssize_t got = fs_read(video_fd, job.slot->data + job.progress, slice);
-
     mutex_unlock(&file_mutex);
 
     if (got != (ssize_t)slice) {
@@ -668,15 +735,14 @@ static void io_pump_slice(void) {
         mutex_lock(&io_mutex);  io_job.state = IO_IDLE;  mutex_unlock(&io_mutex);
         mutex_lock(&chunk_cache_mutex);
         atomic_store_explicit(&job.slot->valid, CHUNK_EMPTY, memory_order_release);
+        job.slot->chunk_id = -1;
         mutex_unlock(&chunk_cache_mutex);
         return;
     }
 
-    // Advance local job state
     job.progress += slice;
     job.cur_off  += slice;
 
-    // Copy back (this keeps io_job.did_seek + io_job.cur_off up to date)
     mutex_lock(&io_mutex);
     if (io_job.state == IO_LOADING && io_job.chunk_id == job.chunk_id) {
         io_job.progress = job.progress;
@@ -698,6 +764,7 @@ static void *io_thread(void *arg) {
     (void)arg;
     ThreadProf prof; prof_init(&prof, "io");
     int last_state = IO_IDLE;
+    uint32_t last_io_seq = atomic_load_explicit(&io_wake_seq, memory_order_acquire);
 
     while (1) {
         double t0 = psTimer();
@@ -715,15 +782,15 @@ static void *io_thread(void *arg) {
         if (last_state == IO_LOADING && cur == IO_IDLE) prof.c1++;
         last_state = cur;
 
-        if (!busy && !atomic_exchange_explicit(&io_wake, 0, memory_order_acq_rel)) {
-            thd_sleep(1);
+        if (!busy) {
+            wait_on_seq(&io_wake_seq, &last_io_seq, 0);
             prof_tick(&prof, 0.0, psTimer() - t0);
             continue;
         }
 
         double w0 = psTimer();
         io_pump_slice();
-        if (busy) prof.c0++;
+        prof.c0++;
         thd_pass();
         prof_tick(&prof, psTimer() - w0, 0.0);
     }
@@ -731,7 +798,7 @@ static void *io_thread(void *arg) {
 }
 
 // =============================================================================
-// Synchronous chunk load (bootstrapping — before threads start)
+// Synchronous chunk load (bootstrapping)
 // =============================================================================
 
 static int load_chunk_sync(int chunk_id, int pin0, int pin1, int pin2) {
@@ -749,18 +816,23 @@ static int load_chunk_sync(int chunk_id, int pin0, int pin1, int pin2) {
     }
     ChunkCache *slot = evict_slot(pin0, pin1, pin2);
     if (!slot) { mutex_unlock(&chunk_cache_mutex); return -1; }
+
+    // Reserve slot for this chunk immediately (same reason as async path)
+    slot->chunk_id = chunk_id;
     atomic_store_explicit(&slot->valid, CHUNK_EMPTY, memory_order_release);
-    slot->chunk_id = -1;
     mutex_unlock(&chunk_cache_mutex);
 
-    ChunkEntry *e    = &chunk_index[chunk_id];
+    ChunkEntry *e     = &chunk_index[chunk_id];
     uint32_t vid_real = e->video_section_size;
     uint32_t vid_disk = vid_real + pad32_after(e->chunk_offset + vid_real);
-    uint32_t aud_disk = e->audio_size * (uint32_t)header.channels;
+    uint32_t aud_disk = align32(e->audio_size) * header.channels;
     uint32_t total    = vid_disk + aud_disk;
 
     if (total > slot->size) {
         printf("❌ [boot] chunk %d needs %u, slot has %u\n", chunk_id, total, slot->size);
+        mutex_lock(&chunk_cache_mutex);
+        slot->chunk_id = -1;
+        mutex_unlock(&chunk_cache_mutex);
         return -1;
     }
 
@@ -786,7 +858,7 @@ static int load_chunk_sync(int chunk_id, int pin0, int pin1, int pin2) {
 // Frame decompression
 // =============================================================================
 
-static int load_frame(int total_frame, int buf_index) {
+static int load_frame(int total_frame, int buf_index, int tid) {
     int chunk_id = find_chunk_for_frame(total_frame);
     ChunkCache *c = cache_acquire(chunk_id);
     if (!c) {
@@ -815,9 +887,33 @@ static int load_frame(int total_frame, int buf_index) {
     int ok = 0;
 
     if (header.compression_type == 1) {
-        size_t out = ZSTD_decompressDCtx(dctx, dst, header.uncompressed_frame_size, src, sz);
-        if (ZSTD_isError(out) || out != header.uncompressed_frame_size) {
-            printf("❌ ZSTD frame %d\n", total_frame); ok = -1;
+        ZSTD_DCtx *dctx = (tid >= 0 && tid < DECODE_THREADS) ? g_zstd_dctx[tid] : NULL;
+        if (!dctx) {
+            printf("❌ ZSTD no dctx tf=%d tid=%d\n", total_frame, tid);
+            ok = -1;
+        } else {
+            ZSTD_DCtx_reset(dctx, ZSTD_reset_session_only);
+            ZSTD_DCtx_setParameter(dctx, ZSTD_d_format, ZSTD_f_zstd1_magicless);
+            
+            ZSTD_inBuffer  in  = { src, (size_t)sz, 0 };
+            ZSTD_outBuffer out = { dst, (size_t)header.uncompressed_frame_size, 0 };
+            
+            size_t ret = 1;
+            while (ret != 0 && out.pos < out.size) {
+                ret = ZSTD_decompressStream(dctx, &out, &in);
+                if (ZSTD_isError(ret)) {
+                    printf("❌ ZSTD decompress error tf=%d: %s\n",
+                        total_frame, ZSTD_getErrorName(ret));
+                    ok = -1;
+                    break;
+                }
+            }
+
+            if (ok == 0 && out.pos != (size_t)header.uncompressed_frame_size) {
+                printf("❌ ZSTD tf=%d decoded %zu/%u\n",
+                    total_frame, out.pos, (unsigned)header.uncompressed_frame_size);
+                ok = -1;
+            }
         }
     } else {
         int out = LZ4_decompress_safe((const char *)src, (char *)dst,
@@ -837,11 +933,14 @@ static int load_frame(int total_frame, int buf_index) {
 // =============================================================================
 
 static void write_silence(uintptr_t dst, size_t bytes) {
+    // spu_memload requires multiples of 32 bytes.
     static uint8_t silence[AUDIO_BUFFER_SIZE] __attribute__((aligned(32)));
     bytes &= ~31u;
     while (bytes) {
         size_t n = MIN(bytes, sizeof(silence)) & ~31u;
         if (!n) break;
+        // Silence buffer is static; safe to flush once in practice, but cheap here.
+        dcache_flush_range((uint32)silence, (uint32)n);
         spu_memload(dst, silence, n);
         dst += n; bytes -= n;
     }
@@ -851,18 +950,22 @@ static void audio_seek_to_frame(int total_frame) {
     int cid = find_chunk_for_frame(total_frame);
     ChunkEntry *e = &chunk_index[cid];
 
-    double t_ms        = (double)total_frame * 1000.0 / (double)header.fps;
-    double chunk_start = (double)cid * (double)header.chunk_duration * 1000.0;
-    double in_chunk_ms = MAX(0.0, t_ms - chunk_start);
-    double bpm         = (double)header.sample_rate * ADPCM_BYTES_PER_SAMPLE / 1000.0;
-    uint32_t pos       = (uint32_t)(in_chunk_ms * bpm) & ~31u;
+    int in_chunk_frames = total_frame - (int)e->start_frame;
+    if (in_chunk_frames < 0) in_chunk_frames = 0;
+    if ((uint32_t)in_chunk_frames > e->num_frames) in_chunk_frames = (int)e->num_frames;
+
+    uint32_t pos = 0;
+    if (e->num_frames) {
+        pos = (uint32_t)(((uint64_t)in_chunk_frames * (uint64_t)e->audio_size) /
+                         (uint64_t)e->num_frames);
+    }
+    pos &= ~31u;
     if (pos > e->audio_size) pos = e->audio_size;
 
     current_audio_chunk  = cid;
     audio_chunk_read_pos = pos;
 
-    // Bump to next chunk if we landed exactly at end
-    if (audio_chunk_read_pos >= e->audio_size && (uint32_t)(cid+1) < header.num_chunks) {
+    if (audio_chunk_read_pos >= e->audio_size && (uint32_t)(cid + 1) < header.num_chunks) {
         current_audio_chunk++;
         audio_chunk_read_pos = 0;
     }
@@ -880,58 +983,109 @@ static void audio_ring_clear(void) {
 }
 
 static void refill_audio_ring(void) {
+    const size_t WANT = ((size_t)AUDIO_BUFFER_SIZE) & ~31u;
+
     int wi  = atomic_load_explicit(&audio_write_idx, memory_order_acquire);
     int ri  = atomic_load_explicit(&audio_read_idx,  memory_order_acquire);
-    int buf = (wi - ri + AUDIO_RING_SIZE) % AUDIO_RING_SIZE;
-    int tgt = target_audio_buffers();
+    int fill = (wi - ri + AUDIO_RING_SIZE) % AUDIO_RING_SIZE;
+    int tgt  = target_audio_buffers();
+
     atomic_store_explicit(&audio_refill_needed, 0, memory_order_release);
 
-    while (buf < tgt) {
+    int tf = atomic_load_explicit(&frame_index, memory_order_acquire);
+    int pc = find_chunk_for_frame(tf);
+
+    while (fill < tgt) {
         int next = (wi + 1) % AUDIO_RING_SIZE;
         if (next == ri) break;
         if ((uint32_t)current_audio_chunk >= header.num_chunks) break;
 
-        ChunkCache *c = cache_acquire(current_audio_chunk);
-        if (!c) {
-            int pc = find_chunk_for_frame(atomic_load_explicit(&frame_index, memory_order_acquire));
-            request_chunk_async(current_audio_chunk, pc, pc+1, pc+2);
-            break;
-        }
-
-        ChunkEntry *e = &chunk_index[current_audio_chunk];
-        if (audio_chunk_read_pos >= e->audio_size) {
-            cache_release(c);
-            current_audio_chunk++; audio_chunk_read_pos = 0;
-            continue;
-        }
-
-        // Prefetch next audio chunk before running out
-        if (current_audio_chunk + 1 < (int)header.num_chunks &&
-            e->audio_size - audio_chunk_read_pos < (size_t)(AUDIO_BUFFER_SIZE * 3)) {
-            int pc = find_chunk_for_frame(atomic_load_explicit(&frame_index, memory_order_acquire));
-            request_chunk_async(current_audio_chunk + 1, current_audio_chunk, pc, pc+1);
-        }
-
-        size_t rem     = e->audio_size - audio_chunk_read_pos;
-        size_t take    = MIN(rem, (size_t)AUDIO_BUFFER_SIZE);
-        size_t aligned = MIN(align32((uint32_t)take), (size_t)AUDIO_BUFFER_SIZE);
-        if (!aligned) { cache_release(c); break; }
-
         memset(audio_ring[wi].left, 0, AUDIO_BUFFER_SIZE);
-        memcpy(audio_ring[wi].left, c->audio_L + audio_chunk_read_pos, take);
-        if (header.channels == 2) {
-            memset(audio_ring[wi].right, 0, AUDIO_BUFFER_SIZE);
-            memcpy(audio_ring[wi].right, c->audio_R + audio_chunk_read_pos, take);
+        if (header.channels == 2) memset(audio_ring[wi].right, 0, AUDIO_BUFFER_SIZE);
+
+        size_t done = 0;
+
+        while (done < WANT) {
+            if ((uint32_t)current_audio_chunk >= header.num_chunks) break;
+
+            if (!is_cached_or_loading(current_audio_chunk))
+                request_chunk_async(current_audio_chunk, current_audio_chunk, pc, pc + 1);
+            if ((uint32_t)(current_audio_chunk + 1) < header.num_chunks &&
+                !is_cached_or_loading(current_audio_chunk + 1))
+                request_chunk_async(current_audio_chunk + 1, current_audio_chunk, pc, pc + 1);
+
+            ChunkCache *c = cache_acquire(current_audio_chunk);
+            if (!c) break;
+
+            ChunkEntry *e = &chunk_index[current_audio_chunk];
+
+            if (audio_chunk_read_pos >= e->audio_size) {
+                cache_release(c);
+                current_audio_chunk++;
+                audio_chunk_read_pos = 0;
+                continue;
+            }
+
+            size_t rem = (size_t)e->audio_size - audio_chunk_read_pos;
+
+            if (rem < 32) {
+                cache_release(c);
+                current_audio_chunk++;
+                audio_chunk_read_pos = 0;
+                continue;
+            }
+
+            size_t need = WANT - done;
+            size_t take = (rem < need) ? rem : need;
+            take &= ~31u;
+
+            if (!take) {
+                cache_release(c);
+                break;
+            }
+
+            memcpy(audio_ring[wi].left + done, c->audio_L + audio_chunk_read_pos, take);
+            if (header.channels == 2)
+                memcpy(audio_ring[wi].right + done, c->audio_R + audio_chunk_read_pos, take);
+
+            audio_chunk_read_pos += take;
+            done += take;
+
+            if (audio_chunk_read_pos >= e->audio_size) {
+                cache_release(c);
+                current_audio_chunk++;
+                audio_chunk_read_pos = 0;
+                continue;
+            }
+
+            if ((uint32_t)(current_audio_chunk + 1) < header.num_chunks) {
+                size_t left_in_chunk = (size_t)e->audio_size - audio_chunk_read_pos;
+                if (left_in_chunk < (WANT * 3)) {
+                    request_chunk_async(current_audio_chunk + 1,
+                                        current_audio_chunk, pc, pc + 1);
+                }
+            }
+
+            cache_release(c);
         }
-        audio_ring[wi].valid_bytes = aligned;
+
+        done &= ~31u;
+        if (done < 32) break;
+
+        audio_ring[wi].valid_bytes = done;
+
+        // Flush the CPU-written region so SPU sees it.
+        dcache_flush_range((uint32)audio_ring[wi].left,  (uint32)done);
+        if (header.channels == 2)
+            dcache_flush_range((uint32)audio_ring[wi].right, (uint32)done);
+
         atomic_store_explicit(&audio_ring[wi].valid, 1, memory_order_release);
-        audio_chunk_read_pos += take;
-        cache_release(c);
 
         wi = next;
         atomic_store_explicit(&audio_write_idx, wi, memory_order_release);
-        ri  = atomic_load_explicit(&audio_read_idx, memory_order_acquire);
-        buf = (wi - ri + AUDIO_RING_SIZE) % AUDIO_RING_SIZE;
+
+        ri   = atomic_load_explicit(&audio_read_idx, memory_order_acquire);
+        fill = (wi - ri + AUDIO_RING_SIZE) % AUDIO_RING_SIZE;
     }
 }
 
@@ -941,14 +1095,18 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t re
     int ch = (int)header.channels;
     if (ch != 1 && ch != 2) return 0;
 
-    // KOS: req is BYTES PER CHANNEL for callback_direct. :contentReference[oaicite:2]{index=2}
-    size_t per_chan = req & ~31u;
+    // Direct callback `req` is TOTAL bytes across channels (common KOS behavior).
+    // Always honor 32-byte alignment for spu_memload.
+    size_t req_total = req & ~31u;
+    if (!req_total) return 0;
+
+    size_t per_chan = (ch == 2) ? ((req_total / 2) & ~31u) : req_total;
     if (!per_chan) return 0;
 
     if (atomic_load_explicit(&audio_muted, memory_order_acquire)) {
         write_silence(l, per_chan);
         if (ch == 2) write_silence(r, per_chan);
-        return per_chan; // return BYTES PER CHANNEL
+        return (ch == 2) ? (per_chan * 2) : per_chan;
     }
 
     size_t pos = g_audio_ring_read_pos;
@@ -960,14 +1118,17 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t re
 
         if (!atomic_load_explicit(&audio_ring[ri].valid, memory_order_acquire)) {
             atomic_store_explicit(&audio_refill_needed, 1, memory_order_release);
+            worker_signal();
+
             write_silence(l + copied, remain);
             if (ch == 2) write_silence(r + copied, remain);
+
             copied += remain;
             remain = 0;
             break;
         }
 
-        size_t valid = audio_ring[ri].valid_bytes; // per-channel
+        size_t valid = audio_ring[ri].valid_bytes; // bytes PER CHANNEL
         if (pos >= valid) {
             atomic_store_explicit(&audio_ring[ri].valid, 0, memory_order_release);
             atomic_store_explicit(&audio_read_idx, (ri + 1) % AUDIO_RING_SIZE, memory_order_release);
@@ -977,19 +1138,22 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t re
 
         size_t to_copy = MIN(valid - pos, remain) & ~31u;
         if (!to_copy) {
-            // Not enough aligned bytes left; consume slot and move on.
             atomic_store_explicit(&audio_ring[ri].valid, 0, memory_order_release);
             atomic_store_explicit(&audio_read_idx, (ri + 1) % AUDIO_RING_SIZE, memory_order_release);
             pos = 0;
             continue;
         }
 
+        // Ensure SPU reads fresh data (paranoia + avoids “stale cache” pops).
+        dcache_flush_range((uint32)(audio_ring[ri].left + pos), (uint32)to_copy);
         spu_memload(l + copied, audio_ring[ri].left + pos, to_copy);
+
         if (ch == 2) {
+            dcache_flush_range((uint32)(audio_ring[ri].right + pos), (uint32)to_copy);
             spu_memload(r + copied, audio_ring[ri].right + pos, to_copy);
         }
 
-        pos += to_copy;
+        pos    += to_copy;
         copied += to_copy;
         remain -= to_copy;
 
@@ -1001,7 +1165,9 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t re
     }
 
     g_audio_ring_read_pos = pos;
-    return per_chan; // return BYTES PER CHANNEL
+
+    // Return TOTAL bytes provided (KOS expects total in stereo).
+    return (ch == 2) ? (copied * 2) : copied;
 }
 
 // =============================================================================
@@ -1013,12 +1179,11 @@ static int schedule_decode(int total_frame) {
     int uid = total_to_unique(total_frame);
     int buf = uid % NUM_BUFFERS;
     int gen = atomic_load_explicit(&GSeekGeneration, memory_order_acquire);
-    int st  = atomic_load_explicit(&buf_state[buf],    memory_order_acquire);
+    int st  = atomic_load_explicit(&buf_state[buf],     memory_order_acquire);
     int bu  = atomic_load_explicit(&buf_unique_id[buf], memory_order_acquire);
 
     if ((st == BUF_READY || st == BUF_LOADING || st == BUF_QUEUED) && bu == uid) return 0;
 
-    // Evict stale ready frame
     if (st == BUF_READY && bu != uid) {
         int old_tf = atomic_load_explicit(&buf_total_frame[buf], memory_order_acquire);
         if (old_tf >= 0 && old_tf < total_frame) {
@@ -1034,15 +1199,18 @@ static int schedule_decode(int total_frame) {
 
     DecodeJob j = { total_frame, uid, buf, gen };
     if (!decode_q_push(&j)) {
-        atomic_store_explicit(&buf_state[buf], BUF_EMPTY, memory_order_release); return 0;
+        atomic_store_explicit(&buf_state[buf], BUF_EMPTY, memory_order_release);
+        return 0;
     }
     return 1;
 }
 
 static void *decode_thread(void *arg) {
-    (void)arg;
+    DecodeThreadArg *A = (DecodeThreadArg *)arg;
+    int tid = A ? A->tid : 0;
+
     ThreadProf prof; prof_init(&prof, "decode");
-    int idle_spins = 0;
+    uint32_t last_seq = atomic_load_explicit(&decode_wake_seq, memory_order_acquire);
 
     while (1) {
         double t0 = psTimer();
@@ -1068,7 +1236,7 @@ static void *decode_thread(void *arg) {
             int expected = BUF_QUEUED;
             if (!atomic_compare_exchange_strong(&buf_state[job.buf], &expected, BUF_LOADING)) continue;
 
-            int ok = load_frame(job.total_frame, job.buf);
+            int ok = load_frame(job.total_frame, job.buf, tid);
             cur_gen = atomic_load_explicit(&GSeekGeneration, memory_order_acquire);
             if (ok == 0 && job.generation == cur_gen &&
                 atomic_load_explicit(&buf_total_frame[job.buf], memory_order_acquire) == job.total_frame &&
@@ -1077,17 +1245,14 @@ static void *decode_thread(void *arg) {
                 prof.c0++;
             } else {
                 atomic_store_explicit(&buf_state[job.buf], BUF_EMPTY, memory_order_release);
-                if (ok != 0) prof.c1++;
             }
         }
 
         if (did_work) {
-            idle_spins = 0;
             thd_pass();
             prof_tick(&prof, psTimer() - w0, 0.0);
         } else {
-            if (++idle_spins >= 120) { thd_sleep(1); idle_spins = 0; }
-            else                       thd_pass();
+            wait_on_seq(&decode_wake_seq, &last_seq, 0);
             prof_tick(&prof, 0.0, psTimer() - t0);
         }
     }
@@ -1108,43 +1273,88 @@ static void decode_reset(void) {
 // =============================================================================
 // Worker thread: audio refill + chunk prefetch
 // =============================================================================
-
 static void *worker_thread(void *arg) {
     (void)arg;
-    ThreadProf prof; prof_init(&prof, "worker");
-    int last_prefetch_chunk = -1, idle_spins = 0;
+
+    ThreadProf prof;
+    prof_init(&prof, "worker");
+
+    int last_prefetch_chunk = -2;
+    uint32_t last_worker_seq =
+        atomic_load_explicit(&worker_wake_seq, memory_order_acquire);
 
     while (1) {
-        double t0 = psTimer();
-        int did_work = 0;
+        double loop_t0 = psTimer();
+        double work_ms = 0.0;
 
-        int wi  = atomic_load_explicit(&audio_write_idx, memory_order_acquire);
-        int ri  = atomic_load_explicit(&audio_read_idx,  memory_order_acquire);
-        if (atomic_exchange_explicit(&audio_refill_needed, 0, memory_order_acq_rel) ||
-            (wi - ri + AUDIO_RING_SIZE) % AUDIO_RING_SIZE < target_audio_buffers()) {
+        /* ------------------------------------------------------------ */
+        /* Audio refill                                                  */
+        /* ------------------------------------------------------------ */
+        {
             double w0 = psTimer();
-            refill_audio_ring();
-            prof_tick(&prof, psTimer() - w0, 0.0);
-            prof.c0++; did_work = 1;
+
+            int wi = atomic_load_explicit(&audio_write_idx, memory_order_acquire);
+            int ri = atomic_load_explicit(&audio_read_idx,  memory_order_acquire);
+            int buf = (wi - ri + AUDIO_RING_SIZE) % AUDIO_RING_SIZE;
+
+            atomic_store_explicit(&audio_refill_needed, 0, memory_order_release);
+
+            if (buf < target_audio_buffers()) {
+                refill_audio_ring();
+                prof.c0++;
+            }
+
+            work_ms += (psTimer() - w0);
         }
 
-        int tf         = atomic_load_explicit(&frame_index, memory_order_acquire);
-        int play_chunk = find_chunk_for_frame(tf);
-        if (play_chunk != last_prefetch_chunk) {
+        /* ------------------------------------------------------------ */
+        /* Chunk prefetch (with early boundary trigger)                 */
+        /* ------------------------------------------------------------ */
+        {
             double w0 = psTimer();
-            prefetch_around(play_chunk);
-            prof_tick(&prof, psTimer() - w0, 0.0);
-            prof.c1++; last_prefetch_chunk = play_chunk; did_work = 1;
+
+            int tf = atomic_load_explicit(&frame_index, memory_order_acquire);
+            int play_chunk = find_chunk_for_frame(tf);
+            int prefetch_chunk = play_chunk;
+
+            if ((uint32_t)play_chunk < header.num_chunks) {
+                ChunkEntry *e = &chunk_index[play_chunk];
+
+                int local_frame = tf - (int)e->start_frame;
+                if (local_frame < 0)
+                    local_frame = 0;
+
+                if ((uint32_t)local_frame < e->num_frames) {
+                    if (e->num_frames > PREFETCH_BOUNDARY_FRAMES &&
+                        (uint32_t)local_frame >= (e->num_frames - PREFETCH_BOUNDARY_FRAMES)) {
+                        if ((uint32_t)(play_chunk + 1) < header.num_chunks) {
+                            prefetch_chunk = play_chunk + 1;
+                        }
+                    }
+                }
+            }
+
+            if (prefetch_chunk != last_prefetch_chunk) {
+                prefetch_around(prefetch_chunk);
+                last_prefetch_chunk = prefetch_chunk;
+                prof.c1++;
+            }
+
+            work_ms += (psTimer() - w0);
         }
 
-        if (did_work) {
-            idle_spins = 0; thd_pass();
-        } else {
-            if (++idle_spins >= 120) { thd_sleep(1); idle_spins = 0; }
-            else                       thd_pass();
-            prof_tick(&prof, 0.0, psTimer() - t0);
-        }
+        /* ------------------------------------------------------------ */
+        /* Idle wait                                                     */
+        /* ------------------------------------------------------------ */
+        double idle_t0 = psTimer();
+        wait_on_seq(&worker_wake_seq, &last_worker_seq, WORKER_POLL_MS);
+        double idle_ms = psTimer() - idle_t0;
+
+        prof_tick(&prof, work_ms, idle_ms);
+
+        (void)loop_t0;
     }
+
     return NULL;
 }
 
@@ -1160,7 +1370,7 @@ static long get_file_size(file_t fd) {
 
 static int load_header(void) {
     fs_seek(video_fd, 0, SEEK_SET);
-    if (fs_read(video_fd, &header, sizeof(header)) != sizeof(header))
+    if (fs_read(video_fd, &header, sizeof(header)) != (ssize_t)sizeof(header))
         { printf("❌ header read\n"); return -1; }
     if (memcmp(header.magic, DCMV_MAGIC, 4) != 0)
         { printf("❌ bad magic\n"); return -1; }
@@ -1178,7 +1388,7 @@ static int load_header(void) {
 }
 
 static int load_chunk_index(void) {
-    long fsz     = get_file_size(video_fd);
+    long fsz      = get_file_size(video_fd);
     uint32_t need = header.num_chunks * 20u;
     uint8_t *raw  = (uint8_t *)malloc(need);
     if (!raw) { printf("❌ [idx] malloc\n"); return -1; }
@@ -1199,17 +1409,17 @@ static int load_chunk_index(void) {
     }
     free(raw);
 
-    // Validate entries
     uint32_t min_off = (uint32_t)sizeof(DCMVHeader) +
                        (header.num_unique_frames + 1) * 4u +
                         header.num_unique_frames * 2u;
     if (min_off < 0x80u) min_off = 0x80u;
+
     uint32_t prev = 0;
     for (uint32_t i = 0; i < header.num_chunks; i++) {
         ChunkEntry *e = &ci[i];
         uint64_t end = (uint64_t)e->chunk_offset + e->video_section_size +
                        pad32_after(e->chunk_offset + e->video_section_size) +
-                       (uint64_t)e->audio_size * header.channels;
+                       (uint64_t)align32(e->audio_size) * header.channels;
         if (e->chunk_offset < min_off || (long)e->chunk_offset >= fsz ||
             (i > 0 && e->chunk_offset < prev) ||
             !e->video_section_size || !e->audio_size || !e->num_frames ||
@@ -1301,10 +1511,9 @@ static inline double playback_now_ms(void) {
     return psTimer() - atomic_load_explicit(&playback_t0_ms, memory_order_acquire);
 }
 
-// Sleep/spin until deadline (psTimer units), polling audio stream throughout.
 static void fmv_wait_until(double deadline_wall_ms) {
-    const double SLEEP_SAFE_MS  = 3.0;  // sleep when >3ms remaining
-    const double SPIN_MARGIN_MS = 1.5;  // spin the final 1.5ms for accuracy
+    const double SLEEP_SAFE_MS  = 3.0;
+    const double SPIN_MARGIN_MS = 1.5;
     while (1) {
         double remain = deadline_wall_ms - psTimer();
         if (remain <= 0.0) break;
@@ -1320,51 +1529,52 @@ static void fmv_wait_until(double deadline_wall_ms) {
 // =============================================================================
 
 static void fmv_tick(void) {
-    // Release previous frame's buffer back to the pool
     if (pending_free_buf >= 0) {
         if (atomic_load_explicit(&buf_state[pending_free_buf], memory_order_acquire) == BUF_READY)
             atomic_store_explicit(&buf_state[pending_free_buf], BUF_EMPTY, memory_order_release);
         pending_free_buf = -1;
     }
 
-    int cur    = atomic_load(&frame_index);
+    int cur = atomic_load(&frame_index);
     if (cur >= (int)header.num_total_frames) return;
 
     int    active = atomic_load_explicit(&playback_started, memory_order_acquire);
     double aud    = active ? playback_now_ms() : 0.0;
 
-    // Skip frames if video is running behind audio
     if (active) {
         double late = aud - (double)cur * frame_duration;
         if (late > 1.5 * frame_duration) {
             int target = MIN((int)(aud / frame_duration), (int)header.num_total_frames - 1);
             target = MIN(target, cur + 6);
-            if (target > cur) { cur = target; atomic_store(&frame_index, cur); }
+            if (target > cur) {
+                printf("[skip] cur=%d -> %d late=%.2fms aud=%.2f\n", cur, target, late, aud);
+                cur = target;
+                atomic_store(&frame_index, cur);
+            }
         }
     }
 
     int uid = total_to_unique(cur);
     int buf = uid % NUM_BUFFERS;
-    int st  = atomic_load(&buf_state[buf]);
+    int st  = atomic_load_explicit(&buf_state[buf], memory_order_acquire);
 
     pvr_scene_begin();
     pvr_list_begin(PVR_LIST_OP_POLY);
 
     int displayed = 0;
 
-    if (st == BUF_READY && atomic_load(&buf_unique_id[buf]) == uid) {
-        // Upload texture only when the frame actually changes
+    if (st == BUF_READY && atomic_load_explicit(&buf_unique_id[buf], memory_order_acquire) == uid) {
         if (uid != last_unique_frame_drawn) {
             dcache_flush_range((uint32)frame_buffer[buf], header.uncompressed_frame_size);
             pvr_txr_load_dma(frame_buffer[buf], pvr_txr,
                              header.uncompressed_frame_size, 1, NULL, 0);
             last_unique_frame_drawn = uid;
         }
+
         sq_fast_cpy((void *)SQ_MASK_DEST(PVR_TA_INPUT), &poly_hdr, sizeof(poly_hdr)/32);
         sq_fast_cpy((void *)SQ_MASK_DEST(PVR_TA_INPUT), vert,      sizeof(vert)/32);
         pending_free_buf = buf;
 
-        // First frame displayed: latch audio start to AICA clock
         if (!active) {
             atomic_store_explicit(&audio_muted, 1, memory_order_release);
             audio_ring_clear();
@@ -1390,27 +1600,20 @@ static void fmv_tick(void) {
         atomic_store(&frame_index, cur + 1);
         displayed = 1;
 
-        // Schedule upcoming frames for decode + prefetch IO
-        // prefetch_around(find_chunk_for_frame(cur));
         for (int i = 1; i <= PREFETCH_AHEAD; i++) {
             if (cur + i >= (int)header.num_total_frames) break;
             schedule_decode(cur + i);
         }
-
     } else {
-        // Stall: evict stale buffer and re-queue this frame
-        if (st == BUF_READY && atomic_load(&buf_unique_id[buf]) != uid) {
-            int old_tf = atomic_load(&buf_total_frame[buf]);
-            if (old_tf >= 0 && old_tf < cur)
-                atomic_store(&buf_state[buf], BUF_EMPTY);
-        }
+        static int stall_count = 0;
+        if ((stall_count++ % 30) == 0)
+            printf("[stall] tf=%d uid=%d buf=%d st=%d\n", cur, uid, buf, st);
         schedule_decode(cur);
     }
 
     pvr_list_finish();
     pvr_scene_finish();
 
-    // Sync: sleep/spin until next frame's target time
     double aud_now  = active ? playback_now_ms() : 0.0;
     int    next     = cur + (displayed ? 1 : 0);
     double next_tgt = (double)next * frame_duration;
@@ -1424,7 +1627,6 @@ static void fmv_tick(void) {
         if (!active) fmv_wait_until(psTimer() + frame_duration);
     }
 
-    // Periodic sync log (every 30 displayed frames)
     if ((cur % 30) == 0) {
         int wi = atomic_load(&audio_write_idx), ri = atomic_load(&audio_read_idx);
         printf("[sync] tf=%d aud=%.2f exp=%.2f drift=%.2f to_next=%.2f rb=%d\n",
@@ -1435,13 +1637,13 @@ static void fmv_tick(void) {
 }
 
 // =============================================================================
-// Sleep calibration (call before creating threads for a clean measurement)
+// Sleep calibration
 // =============================================================================
 
 static void calibrate_sleep_quantum(void) {
     uint64_t sum = 0;
     const int n = 16;
-    thd_sleep(1); thd_pass(); // warmup
+    thd_sleep(1); thd_pass();
     for (int i = 0; i < n; i++) {
         uint64_t t0 = timer_us_gettime64();
         thd_sleep(1);
@@ -1460,7 +1662,6 @@ int main(int argc, char **argv) {
     (void)argc; (void)argv;
     printf("🎬 DCMV v1.0 Player\n");
 
-    // Prefer GD-ROM, fall back to dcload /pc/
     video_fd = fs_open("/cd/movie.dcmv", O_RDONLY);
     if (video_fd >= 0) VIDEO_FILE = "/cd/movie.dcmv";
     else {
@@ -1472,18 +1673,19 @@ int main(int argc, char **argv) {
 
     if (load_header() < 0) return -1;
 
-    // Skip vid_set_mode on dcload to preserve the debug console
     if (!VIDEO_FILE || strncmp(VIDEO_FILE, "/pc/", 4) != 0)
         vid_set_mode(DM_640x480, PM_RGB565);
     else
         printf("[boot] /pc: skipping vid_set_mode\n");
 
+    // Zstd: one DCtx per decode thread (Zstd ctx is NOT thread-safe).
     if (header.compression_type == 1) {
-        dctx = ZSTD_createDCtx();
-        if (!dctx) { printf("❌ ZSTD_createDCtx\n"); return -1; }
+        for (int i = 0; i < DECODE_THREADS; i++) {
+            g_zstd_dctx[i] = ZSTD_createDCtx();
+            if (!g_zstd_dctx[i]) { printf("❌ ZSTD_createDCtx[%d]\n", i); return -1; }
+        }
     }
 
-    // Frame size / duration tables
     fs_seek(video_fd, sizeof(DCMVHeader), SEEK_SET);
     frame_sizes     = (uint32_t *)malloc((header.num_unique_frames + 1) * 4);
     frame_durations = (uint16_t *)malloc(header.num_unique_frames * 2);
@@ -1496,73 +1698,85 @@ int main(int argc, char **argv) {
     memset(chunk_cache, 0, sizeof(chunk_cache));
     if (init_chunk_cache() < 0) return -1;
 
-    // Build total-frame -> unique-frame LUT
     t2u_lut = (uint16_t *)malloc(header.num_total_frames * 2);
     if (!t2u_lut) { printf("❌ t2u_lut alloc\n"); return -1; }
     {
         int t = 0;
         for (uint32_t u = 0; u < header.num_unique_frames; u++) {
             uint16_t dur = frame_durations[u]; if (!dur) dur = 1;
-            for (uint16_t r = 0; r < dur && t < (int)header.num_total_frames; r++)
+            for (uint16_t rr = 0; rr < dur && t < (int)header.num_total_frames; rr++)
                 t2u_lut[t++] = (uint16_t)u;
         }
         uint16_t last = header.num_unique_frames ? (uint16_t)(header.num_unique_frames - 1) : 0;
         while (t < (int)header.num_total_frames) t2u_lut[t++] = last;
     }
 
-    // Frame decode buffers
     for (int i = 0; i < NUM_BUFFERS; i++) {
         frame_buffer[i] = (uint8_t *)memalign(32, header.uncompressed_frame_size);
         if (!frame_buffer[i]) { printf("❌ frame_buffer[%d]\n", i); return -1; }
-        atomic_store(&buf_state[i],      BUF_EMPTY);
+        atomic_store(&buf_state[i],       BUF_EMPTY);
         atomic_store(&buf_total_frame[i], -1);
         atomic_store(&buf_unique_id[i],   -1);
     }
 
     if (init_pvr() < 0) return -1;
 
-    // Audio: stream start deferred until first displayed frame
     snd_stream_init_ex(header.channels, AUDIO_BUFFER_SIZE);
     stream = snd_stream_alloc(NULL, AUDIO_BUFFER_SIZE);
     snd_stream_set_callback_direct(stream, audio_cb);
     snd_stream_volume(stream, 255);
+
     atomic_store(&audio_muted,      1);
     atomic_store(&playback_started, 0);
     atomic_store_explicit(&playback_t0_ms, 0.0, memory_order_release);
-    audio_ring_clear();
-    current_audio_chunk = 0; audio_chunk_read_pos = 0;
 
-    // Sync-load first 3 chunks before spawning threads
+    audio_ring_clear();
+    current_audio_chunk = 0;
+    audio_chunk_read_pos = 0;
+
     printf("🔄 Preloading chunks...\n");
-    for (int i = 0; i < MIN(3, (int)header.num_chunks); i++) {
-        if (load_chunk_sync(i, 0, 1, 2) < 0)
-            { printf("❌ sync load chunk %d\n", i); return -1; }
+    for (int i = 0; i < MIN(4, (int)header.num_chunks); i++) {
+        if (load_chunk_sync(i, 0, 1, 2) < 0) {
+            printf("❌ sync load chunk %d\n", i);
+            return -1;
+        }
     }
 
-    // Calibrate with no other threads for a clean 1ms measurement
     thd_set_hz(1000);
+    thd_set_prio(thd_current, 1);
     calibrate_sleep_quantum();
 
     atomic_store_explicit(&io_enabled, 1, memory_order_release);
 
-    // KOS: lower priority number = higher priority
-    for (int i = 0; i < DECODE_THREADS; i++)
-        thd_create(2 + i, decode_thread, NULL); // 2, 3
-    thd_create(4, worker_thread, NULL);          // 4
-    thd_create(6, io_thread,     NULL);          // 6 (lowest)
+    // ---- FIX: avoid priority collisions ----
+    // decode: 2..(1+DECODE_THREADS)
+    // worker: 2+DECODE_THREADS
+    // io    : 3+DECODE_THREADS
+    int pr_decode_base = 2;
+    int pr_worker      = pr_decode_base + DECODE_THREADS;
+    int pr_io          = pr_worker + 1;
 
-    // Warm up frame decode buffers synchronously before the main loop
+    for (int i = 0; i < DECODE_THREADS; i++) {
+        g_decode_args[i].tid = i;
+        thd_create(pr_decode_base + i, decode_thread, &g_decode_args[i]);
+    }
+    thd_create(pr_worker, worker_thread, NULL);
+    thd_create(pr_io,     io_thread,     NULL);
+
+    for (int i = 3; i < MIN(3 + ACTIVE_CHUNK_CACHE_SLOTS - 3, (int)header.num_chunks); i++)
+        request_chunk_async(i, 0, 1, 2);
+
     printf("🔄 Warming frame cache...\n");
     decode_reset();
     int warm = MIN(INITIAL_PRELOAD, (int)header.num_total_frames);
     for (int tf = 0; tf < warm; tf++) {
         int uf = total_to_unique(tf), b = uf % NUM_BUFFERS;
         if (atomic_load(&buf_unique_id[b]) == uf && atomic_load(&buf_state[b]) == BUF_READY) continue;
-        atomic_store(&buf_state[b],      BUF_LOADING);
+        atomic_store(&buf_state[b],       BUF_LOADING);
         atomic_store(&buf_total_frame[b], tf);
         atomic_store(&buf_unique_id[b],   uf);
-        if (load_frame(tf, b) == 0) atomic_store(&buf_state[b], BUF_READY);
-        else                        atomic_store(&buf_state[b], BUF_EMPTY);
+        if (load_frame(tf, b, 0) == 0) atomic_store(&buf_state[b], BUF_READY);
+        else                           atomic_store(&buf_state[b], BUF_EMPTY);
     }
 
     frame_duration = 1000.0 / (double)header.fps;
@@ -1589,7 +1803,11 @@ int main(int argc, char **argv) {
     }
     for (int i = 0; i < NUM_BUFFERS; i++) free(frame_buffer[i]);
     free(frame_sizes); free(frame_durations); free(chunk_index); free(t2u_lut);
-    if (dctx) ZSTD_freeDCtx(dctx);
+
+    for (int i = 0; i < DECODE_THREADS; i++) {
+        if (g_zstd_dctx[i]) ZSTD_freeDCtx(g_zstd_dctx[i]);
+        g_zstd_dctx[i] = NULL;
+    }
 
     arch_exit();
     return 0;

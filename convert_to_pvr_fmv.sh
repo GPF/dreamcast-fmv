@@ -20,7 +20,7 @@ SKIP_IF_EXISTS=true
 
 # Input/Output Settings
 # AUDIOINPUT="input/dle.ogg" # Example for audio input
-INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4"
+INPUT="input/videoplayback.mp4"
 AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
@@ -28,13 +28,13 @@ TEMP_DIR="temp_frames"
 FINAL_OUTPUT="./playdcmv/movie.dcmv"
 
 # Video Settings
-FPS=23.98
+FPS=29.97
 FORMAT="yuv422" # Options: rgb565, yuv422
 USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=320 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=240
+SCALE_WIDTH=480 # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT=360
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
@@ -42,16 +42,16 @@ SCALE_HEIGHT=240
 # VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
 
 # Audio Settings
-AUDIO_RATE=22050
-CHANNELS=1
+AUDIO_RATE=44100
+CHANNELS=2
 
 USE_DEDUP=false  # Set to false to disable frame deduplication
-COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
+COMPRESSION_BACKEND="zstd" # Options: lz4, zstd
 CHUNK_DURATION="${CHUNK_DURATION:-1.5}"  # Default 2.0, override with env variable if needed
 
 if [ "$USE_STRIDED" = true ]; then
-    WIDTH=320 # Direct strided texture
-    HEIGHT=240
+    WIDTH=$SCALE_WIDTH # Direct strided texture
+    HEIGHT=$SCALE_HEIGHT
 else
     WIDTH=512 # POT texture with padding
     HEIGHT=256

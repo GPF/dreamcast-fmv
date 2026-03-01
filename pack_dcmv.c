@@ -664,89 +664,67 @@ int main(int argc, char **argv) {
         free(already_compressed);
         chunk_index[chunk_id].video_section_size = video_section_size;
 
-// Align BEFORE audio for AICA ADPCM safety: audio section start is 32B aligned
+// Align BEFORE audio for DMA friendliness
 pad_to_alignment(out, 32);
 
-// Write audio for this chunk (assumes planar stereo source: [all L][all R])
 {
-    // Tie audio positioning to video timeline to avoid chunk-boundary drift.
-    // Compute using samples so rounding is consistent.
-    const double samples_per_frame = (double)sample_rate / (double)fps;
-
-    const uint64_t start_samples = (uint64_t)llround((double)start_frame * samples_per_frame);
-    const uint64_t chunk_samples = (uint64_t)llround((double)frames_in_chunk * samples_per_frame);
-
-    // ADPCM 4-bit: 1 byte = 2 samples => bytes = ceil(samples/2)
-    size_t payload_bytes = (size_t)((chunk_samples + 1u) / 2u);
-    if (payload_bytes < 1) payload_bytes = 1;
-
-    // keep even (nice for some copy loops; not strictly required)
-    payload_bytes = (payload_bytes + 1) & ~((size_t)1);
-
-    // What we actually write to disk: pad up to 32 so player can DMA/memload in 32B units
-    size_t written_bytes = align_up_size(payload_bytes, 32);
-
-    // safety clamp (applies to written size)
-    if (written_bytes > max_audio_bytes_per_ch) {
-        written_bytes = max_audio_bytes_per_ch;
-
-        // keep payload <= written, and even
-        if (payload_bytes > written_bytes) payload_bytes = written_bytes;
-        payload_bytes = (payload_bytes + 1) & ~((size_t)1);
-        if (payload_bytes > written_bytes) payload_bytes = written_bytes;
-    }
-
-    // IMPORTANT: audio_size in the index should represent the "real" audio payload for this chunk,
-    // not the padded written size.
-    chunk_index[chunk_id].audio_size = (uint32_t)payload_bytes;
-
     const long per_ch_total = (channels == 2) ? (total_audio_size / 2) : total_audio_size;
 
-    // byte offset in source audio for this chunk (per channel)
-    long rel = (long)(start_samples / 2u);
+    // Frame->byte mapping based on REAL file size (opaque ADPCM stream)
+    auto uint64_t byte_pos_for_frame(uint32_t tf) {
+        return ((uint64_t)tf * (uint64_t)per_ch_total) / (uint64_t)num_total_frames;
+    }
 
-    // We'll read only payload_bytes of real audio, then zero-pad to written_bytes.
-    if (rel < 0 || rel >= per_ch_total) {
-        // Entire chunk is silence
+    uint64_t start_b = byte_pos_for_frame(start_frame);
+    uint64_t end_b   = byte_pos_for_frame(end_frame);
+
+    if (end_b < start_b) end_b = start_b;
+    size_t payload_bytes = (size_t)(end_b - start_b);
+
+    // ADPCM safety: align boundaries (start with 32; if still blasts, try 256)
+    const size_t ADPCM_ALIGN = 32;
+
+    // round start down, end down, so we don't ever jump into the middle of a block
+    start_b &= ~((uint64_t)ADPCM_ALIGN - 1);
+    end_b   &= ~((uint64_t)ADPCM_ALIGN - 1);
+    if (end_b < start_b) end_b = start_b;
+
+    payload_bytes = (size_t)(end_b - start_b);
+    if (payload_bytes < 1) payload_bytes = ADPCM_ALIGN;
+
+    // what we write (pad up to 32B so player can copy in 32B units)
+    size_t written_bytes = align_up_size(payload_bytes, 32);
+
+    // clamp for buffer safety
+    if (written_bytes > max_audio_bytes_per_ch) written_bytes = max_audio_bytes_per_ch;
+    if (payload_bytes > written_bytes) payload_bytes = written_bytes;
+
+    // Index should describe REAL payload bytes per channel
+    chunk_index[chunk_id].audio_size = (uint32_t)payload_bytes;
+
+    // Helper to write one channel payload
+    auto void write_channel(long base_off) {
+        // base_off is audio_data_start (+0 for L, +per_ch_total for R)
         memset(audio_buffer, 0, written_bytes);
+
+        if ((long)start_b < per_ch_total) {
+            long avail = per_ch_total - (long)start_b;
+            size_t to_read = payload_bytes;
+            if ((long)to_read > avail) to_read = (size_t)avail;
+
+            fseek(audio_fp, base_off + (long)start_b, SEEK_SET);
+            fread(audio_buffer, 1, to_read, audio_fp);
+        }
+
+        // zero padding already in audio_buffer to written_bytes
         fwrite(audio_buffer, 1, written_bytes, out);
-        if (channels == 2) {
-            fwrite(audio_buffer, 1, written_bytes, out);
-        }
+    };
+
+    if (channels == 1) {
+        write_channel(audio_data_start);
     } else {
-        long avail = per_ch_total - rel;
-        size_t to_read = payload_bytes;
-        if ((long)to_read > avail) to_read = (size_t)avail;
-
-        if (channels == 1) {
-            fseek(audio_fp, audio_data_start + rel, SEEK_SET);
-            size_t got = fread(audio_buffer, 1, to_read, audio_fp);
-
-            // pad payload tail to payload_bytes
-            if (got < payload_bytes) memset(audio_buffer + got, 0, payload_bytes - got);
-            // pad up to written_bytes for DMA friendliness
-            if (payload_bytes < written_bytes) memset(audio_buffer + payload_bytes, 0, written_bytes - payload_bytes);
-
-            fwrite(audio_buffer, 1, written_bytes, out);
-        } else {
-            // LEFT
-            fseek(audio_fp, audio_data_start + rel, SEEK_SET);
-            size_t gotL = fread(audio_buffer, 1, to_read, audio_fp);
-
-            if (gotL < payload_bytes) memset(audio_buffer + gotL, 0, payload_bytes - gotL);
-            if (payload_bytes < written_bytes) memset(audio_buffer + payload_bytes, 0, written_bytes - payload_bytes);
-
-            fwrite(audio_buffer, 1, written_bytes, out);
-
-            // RIGHT (planar after left)
-            fseek(audio_fp, audio_data_start + per_ch_total + rel, SEEK_SET);
-            size_t gotR = fread(audio_buffer, 1, to_read, audio_fp);
-
-            if (gotR < payload_bytes) memset(audio_buffer + gotR, 0, payload_bytes - gotR);
-            if (payload_bytes < written_bytes) memset(audio_buffer + payload_bytes, 0, written_bytes - payload_bytes);
-
-            fwrite(audio_buffer, 1, written_bytes, out);
-        }
+        write_channel(audio_data_start);                 // LEFT
+        write_channel(audio_data_start + per_ch_total);  // RIGHT (planar)
     }
 }
 
