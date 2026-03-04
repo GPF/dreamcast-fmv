@@ -20,7 +20,7 @@ SKIP_IF_EXISTS=true
 
 # Input/Output Settings
 # AUDIOINPUT="input/dle.ogg" # Example for audio input
-INPUT="input/videoplayback.mp4"
+INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4" # Path to input video file (MP4)
 AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
@@ -28,13 +28,13 @@ TEMP_DIR="temp_frames"
 FINAL_OUTPUT="./playdcmv/movie.dcmv"
 
 # Video Settings
-FPS=29.97
+FPS=23.98
 FORMAT="yuv422" # Options: rgb565, yuv422
 USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=480 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=360
+SCALE_WIDTH=640 # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT=480
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
@@ -46,7 +46,7 @@ AUDIO_RATE=44100
 CHANNELS=2
 
 USE_DEDUP=false  # Set to false to disable frame deduplication
-COMPRESSION_BACKEND="zstd" # Options: lz4, zstd
+COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
 CHUNK_DURATION="${CHUNK_DURATION:-1.5}"  # Default 2.0, override with env variable if needed
 
 if [ "$USE_STRIDED" = true ]; then
