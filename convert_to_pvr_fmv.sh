@@ -47,7 +47,7 @@ CHANNELS=2
 
 USE_DEDUP=false  # Set to false to disable frame deduplication
 COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
-CHUNK_DURATION="${CHUNK_DURATION:-1.5}"  # Default 2.0, override with env variable if needed
+CHUNK_DURATION="${CHUNK_DURATION:-0.5}"  # Default 2.0, override with env variable if needed
 
 if [ "$USE_STRIDED" = true ]; then
     WIDTH=$SCALE_WIDTH # Direct strided texture
