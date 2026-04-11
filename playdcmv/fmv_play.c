@@ -21,11 +21,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdatomic.h>
-#include <fastmem/fastmem.h>
-#define LZ4_memcpy(d,s,n) memcpy_fast((d),(s),(n))
-#define LZ4_memmove(d,s,n) memmove_fast((d),(s),(n))
-#define LZ4_memset(d,s,n) memset_fast((d),(s),(n))
-#define LZ4_FREESTANDING 1
+// #include <fastmem/fastmem.h>
+// #define LZ4_memcpy(d,s,n) memcpy_fast((d),(s),(n))
+// #define LZ4_memmove(d,s,n) memmove_fast((d),(s),(n))
+// #define LZ4_memset(d,s,n) memset_fast((d),(s),(n))
+// #define LZ4_FREESTANDING 1
 // #include <sh4zam/shz_sh4zam.h>
 // #define LZ4_memcpy(d,s,n) shz_memcpy((d),(s),(n))
 // #define LZ4_memmove(d,s,n) memmove((d),(s),(n))  // Still need standard memmove

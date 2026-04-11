@@ -19,22 +19,22 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-AUDIOINPUT="input/dle.ogg" # Example for audio input
-INPUT="input/dle.m2v"
-# AUDIOINPUT=$INPUT
+# AUDIOINPUT="input/dle.ogg" # Example for audio input
+INPUT="input/cleaned_input.mp4" # Path to input video file (MP4)
+AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
 TEMP_DIR="temp_frames"
 FINAL_OUTPUT="./playdcmv/movie.dcmv"
 
 # Video Settings
-FPS=23.98
+FPS=50
 FORMAT="yuv422" # Options: rgb565, yuv422
 USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=320 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=240
+SCALE_WIDTH=640 # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT=480
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
@@ -43,14 +43,14 @@ SCALE_HEIGHT=240
 
 # Audio Settings
 AUDIO_RATE=44100
-CHANNELS=1
+CHANNELS=2
 
 USE_DEDUP=false  # Set to false to disable frame deduplication
 COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
 
 if [ "$USE_STRIDED" = true ]; then
-    WIDTH=320 # Direct strided texture
-    HEIGHT=240
+    WIDTH=640 # Direct strided texture
+    HEIGHT=480
 else
     WIDTH=512 # POT texture with padding
     HEIGHT=256
@@ -334,14 +334,14 @@ else
     echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
     
     # Test: Use FFmpeg's adpcm_yamaha with WAV format
-    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" \
-      -ac "$CHANNELS" -ar "$AUDIO_RATE" \
-      -c:a adpcm_yamaha -f wav -y "$AUDIO_OUT"
+    # ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" \
+    #   -ac "$CHANNELS" -ar "$AUDIO_RATE" \
+    #   -c:a adpcm_yamaha -f wav -y "$AUDIO_OUT"
     
     # Original method (commented out for comparison)
-    # ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
-    # "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
-    #   -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
+    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
+    "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
+      -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
 fi
 
 echo "📦 Packing into compressed .dcmv format..."
