@@ -40,7 +40,7 @@
  *   pack_dcmv_v6 <output.dcmv> <frame_type> <width> <height>
  *                <scale_width> <scale_height> <fps>
  *                <sample_rate> <channels>
- *                <frame_pattern> <audio_file> <frame_durations.txt> <compression>
+ *                <frame_pattern> <audio_file|- for none> <frame_durations.txt> <compression>
  *
  * Example:
  *   ./pack_dcmv_v6 movie.dcmv 1 320 240 320 240 23.97 \
@@ -246,6 +246,10 @@ int main(int argc, char **argv) {
     const char *compression = argv[13];
     int use_zstd = (strcmp(compression, "zstd") == 0);
 
+    if (channels == 0) {
+        sample_rate = 0;
+    }
+
     if (load_durations(durations_path) != 0) {
         return 1;
     }
@@ -256,19 +260,23 @@ int main(int argc, char **argv) {
     printf("   FPS: %.2f, Audio: %dHz, %d channel(s)\n", fps, sample_rate, channels);
     printf("   Unique frames: %u, Total frames: %u\n", num_unique_frames, num_total_frames);
 
-    // Open audio
-    FILE *audio_fp = fopen(audio_path, "rb");
-    if (!audio_fp) {
-        perror("Audio open failed");
-        return 1;
-    }
-    char head[4];
-    size_t read_bytes = fread(head, 1, 4, audio_fp);
-    if (memcmp(head, "DcAF", 4) == 0) {
-        fseek(audio_fp, 0x40, SEEK_SET);
-        printf("🔊 Skipping 64-byte DcAF header from %s\n", audio_path);
+    FILE *audio_fp = NULL;
+    if (channels > 0 && audio_path && strcmp(audio_path, "-") != 0) {
+        audio_fp = fopen(audio_path, "rb");
+        if (!audio_fp) {
+            perror("Audio open failed");
+            return 1;
+        }
+        char head[4];
+        fread(head, 1, 4, audio_fp);
+        if (memcmp(head, "DcAF", 4) == 0) {
+            fseek(audio_fp, 0x40, SEEK_SET);
+            printf("🔊 Skipping 64-byte DcAF header from %s\n", audio_path);
+        } else {
+            rewind(audio_fp);
+        }
     } else {
-        rewind(audio_fp);
+        printf("🔇 Audio disabled; packing video-only DCMV\n");
     }
 
     // Determine frame size
@@ -444,16 +452,17 @@ int main(int argc, char **argv) {
     
     printf("🔊 Audio will start at offset: 0x%08X (%u)\n", audio_offset, audio_offset);
 
-    // Copy audio
-    uint8_t audio_buffer[4096];
-    size_t audio_bytes_copied = 0;
-    while (!feof(audio_fp)) {
-        size_t bytes_read = fread(audio_buffer, 1, sizeof(audio_buffer), audio_fp);
-        fwrite(audio_buffer, 1, bytes_read, out);
-        audio_bytes_copied += bytes_read;
+    if (audio_fp) {
+        uint8_t audio_buffer[4096];
+        size_t audio_bytes_copied = 0;
+        while (!feof(audio_fp)) {
+            size_t bytes_read = fread(audio_buffer, 1, sizeof(audio_buffer), audio_fp);
+            fwrite(audio_buffer, 1, bytes_read, out);
+            audio_bytes_copied += bytes_read;
+        }
+        fclose(audio_fp);
+        printf("🔊 Copied %zu bytes of audio\n", audio_bytes_copied);
     }
-    fclose(audio_fp);
-    printf("🔊 Copied %zu bytes of audio\n", audio_bytes_copied);
     
     // Optional: Pad final file to 2048-byte boundary
     // printf("📐 Aligning final file size...\n");

@@ -19,8 +19,8 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-# AUDIOINPUT="input/dle.ogg" # Example for audio input
-INPUT="input/cleaned_input.mp4" # Path to input video file (MP4)
+# AUDIOINPUT="input/hayate.ogg" # Example for audio input
+INPUT="input/YTDown.com_YouTube_Not-Broken_Media_xZi2Xpu6qKs_001_1080p_30fps.mp4" # Path to input video file (MP4)
 AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
@@ -28,7 +28,7 @@ TEMP_DIR="temp_frames"
 FINAL_OUTPUT="./playdcmv/movie.dcmv"
 
 # Video Settings
-FPS=50
+FPS=30
 FORMAT="yuv422" # Options: rgb565, yuv422
 USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 
@@ -42,10 +42,14 @@ SCALE_HEIGHT=480
 # VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
 
 # Audio Settings
-AUDIO_RATE=44100
+AUDIO_RATE=22050
 CHANNELS=2
 
-USE_DEDUP=false  # Set to false to disable frame deduplication
+if [ "$CHANNELS" -eq 0 ]; then
+    AUDIO_RATE=0
+fi
+
+USE_DEDUP=true  # Set to false to disable frame deduplication
 COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
 
 if [ "$USE_STRIDED" = true ]; then
@@ -190,7 +194,7 @@ process_rgb565() {
     # Extract frames if not already extracted
     if ! compgen -G "$UNIQUE_FRAMES/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
         echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
-        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%06d.$INTERMEDIATE_FORMAT" || exit 1
+        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
     else
         echo "✅ Found extracted frames in $TEMP_DIR, skipping ffmpeg extraction."
     fi
@@ -236,7 +240,7 @@ process_rgb565() {
     else
         local frame_idx=0
         for intermediate_file in "$UNIQUE_FRAMES"/frame*.$INTERMEDIATE_FORMAT; do
-            local base=$(printf "frame%06d" "$frame_idx")
+            local base=$(printf "frame%05d" "$frame_idx")
             $PVRTX -i "$intermediate_file" -o "$OUTPUT_DIR/${base}.${EXT}" "${pvrtx_opts[@]}" $PVRTX_QUIET || exit 1
             ((frame_idx++))
         done
@@ -254,7 +258,7 @@ process_yuv422() {
     if ! compgen -G "$TEMP_DIR/frame*.$INTERMEDIATE_FORMAT" >/dev/null && \
        ! compgen -G "$UNIQUE_FRAMES/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
         echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
-        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%06d.$INTERMEDIATE_FORMAT" || exit 1
+        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
     else
         echo "✅ Found extracted frames, skipping ffmpeg extraction."
     fi
@@ -303,7 +307,7 @@ process_yuv422() {
     else
         local frame_idx=0
         for intermediate_file in "$UNIQUE_FRAMES"/frame*.$INTERMEDIATE_FORMAT; do
-            local base=$(printf "frame%06d" "$frame_idx")
+            local base=$(printf "frame%05d" "$frame_idx")
             $PVRTX -i "$intermediate_file" -o "$OUTPUT_DIR/${base}.${EXT}" "${pvrtx_opts[@]}" $PVRTX_QUIET || exit 1
             ((frame_idx++))
         done
@@ -326,27 +330,32 @@ esac
 
 echo "✅ Converted frames complete."
 
-# Extract and convert audio
-AUDIO_OUT="$OUTPUT_DIR/audio.dca"
-if [ "$SKIP_IF_EXISTS" = true ] && [[ -f "$AUDIO_OUT" ]]; then
-    echo "✅ Found existing audio.dca, skipping audio extraction."
+if [ "$CHANNELS" -eq 0 ]; then
+    AUDIO_OUT="-"
+    echo "🔇 Audio disabled; skipping extraction and conversion."
 else
-    echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
-    
-    # Test: Use FFmpeg's adpcm_yamaha with WAV format
-    # ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" \
-    #   -ac "$CHANNELS" -ar "$AUDIO_RATE" \
-    #   -c:a adpcm_yamaha -f wav -y "$AUDIO_OUT"
-    
-    # Original method (commented out for comparison)
-    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
-    "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
-      -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
+    # Extract and convert audio
+    AUDIO_OUT="$OUTPUT_DIR/audio.dca"
+    if [ "$SKIP_IF_EXISTS" = true ] && [[ -f "$AUDIO_OUT" ]]; then
+        echo "✅ Found existing audio.dca, skipping audio extraction."
+    else
+        echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
+
+        # Test: Use FFmpeg's adpcm_yamaha with WAV format
+        # ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" \
+        #   -ac "$CHANNELS" -ar "$AUDIO_RATE" \
+        #   -c:a adpcm_yamaha -f wav -y "$AUDIO_OUT"
+
+        # Original method (commented out for comparison)
+        ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
+        "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
+          -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
+    fi
 fi
 
 echo "📦 Packing into compressed .dcmv format..."
 "$PACKER" "$FINAL_OUTPUT" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$SCALE_WIDTH" "$SCALE_HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
-  "$OUTPUT_DIR/frame%06d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" || exit 1
+  "$OUTPUT_DIR/frame%05d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" || exit 1
 
 
 # Clean up intermediate files
