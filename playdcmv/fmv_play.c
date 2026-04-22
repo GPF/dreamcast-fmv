@@ -18,9 +18,14 @@ static kthread_t *worker_thread_id = NULL;
 static char screenshotfilename[256];
 static char movie_path[256];
 static int *t2u_lut = NULL;
+static int resume_after_seek = 0;
 
+// Timer function
 static inline float psTimer(void) {
-    return (float)timer_ms_gettime64();
+    #define AICA_MEM_CLOCK 0x021000
+    uint32_t jiffies = g2_read_32(SPU_RAM_UNCACHED_BASE + AICA_MEM_CLOCK);
+    const float AICA_TICKS_PER_MS = 4.410f; 
+    return jiffies / AICA_TICKS_PER_MS;
 }
 
 static int is_power_of_2(int n) {
@@ -203,6 +208,38 @@ static void seek_audio_to_current_frame(void) {
     }
 }
 
+static void pause_for_seek(void) {
+    if (dcfmv_is_paused(dcfmv_current))
+        return;
+
+    dcfmv_set_paused(dcfmv_current, 1);
+    resume_after_seek = 1;
+    atomic_store(&audio_muted, 1);
+    if (audio_channels > 0 && audio_started) {
+        snd_stream_stop(stream);
+        audio_started = 0;
+    }
+    printf("[FMV] paused for seek\n");
+}
+
+static void resume_playback_from_current_frame(void) {
+    double now = dcfmv_ps_ms();
+    int current_frame = dcfmv_frame_index(dcfmv_current);
+    double frame_ms = (double)current_frame * frame_duration;
+    frame_timer_anchor = now;
+    atomic_store(&audio_start_time_ms, audio_channels > 0 ? frame_ms : 0.0);
+    if (audio_channels > 0) {
+        seek_audio_to_current_frame();
+        thd_sleep(2);
+        if (!audio_started) {
+            snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
+            snd_stream_volume(stream, 255);
+            audio_started = 1;
+        }
+        atomic_store(&audio_muted, 0);
+    }
+}
+
 static void wait_exit(void) {
     static uint16_t prev_buttons = 0;
     maple_device_t *dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
@@ -224,26 +261,15 @@ static void wait_exit(void) {
             }
             printf("[FMV] paused\n");
         } else {
-            double now = dcfmv_ps_ms();
-            int current_frame = dcfmv_frame_index(dcfmv_current);
-            double frame_ms = (double)current_frame * frame_duration;
-            frame_timer_anchor = now;
-            atomic_store(&audio_start_time_ms, audio_channels > 0 ? frame_ms : 0.0);
-            if (audio_channels > 0) {
-                seek_audio_to_current_frame();
-                thd_sleep(2);
-                if (!audio_started) {
-                    snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
-                    snd_stream_volume(stream, 255);
-                    audio_started = 1;
-                }
-                atomic_store(&audio_muted, 0);
-            }
+            resume_after_seek = 0;
+            resume_playback_from_current_frame();
             printf("[FMV] resumed\n");
         }
     } else if (state->buttons & CONT_DPAD_RIGHT) {
+        pause_for_seek();
         dcfmv_request_seek(dcfmv_current, current + 500);
     } else if (state->buttons & CONT_DPAD_LEFT) {
+        pause_for_seek();
         dcfmv_request_seek(dcfmv_current, current - 500);
     } else if (state->buttons & CONT_A) {
         sprintf(screenshotfilename, "/pc/screenshot%d.ppm", current);
@@ -378,6 +404,15 @@ int main(int argc, char **argv) {
     while (atomic_load(&frame_index) < num_total_frames) {
         wait_exit();
         dcfmv_tick(dcfmv_current);
+        if (resume_after_seek &&
+            dcfmv_is_paused(dcfmv_current) &&
+            atomic_load(&seek_in_progress) == 0 &&
+            atomic_load(&seek_settle_frames) <= 0) {
+            resume_after_seek = 0;
+            dcfmv_set_paused(dcfmv_current, 0);
+            resume_playback_from_current_frame();
+            printf("[FMV] resumed after seek\n");
+        }
     }
 
     printf("Playback finished\n");
