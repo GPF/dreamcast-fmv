@@ -12,11 +12,11 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define VIDEO_FILE "/pc/movie.dcmv"
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 
 static kthread_t *worker_thread_id = NULL;
 static char screenshotfilename[256];
+static char movie_path[256];
 static int *t2u_lut = NULL;
 
 static inline float psTimer(void) {
@@ -25,6 +25,27 @@ static inline float psTimer(void) {
 
 static int is_power_of_2(int n) {
     return n > 0 && (n & (n - 1)) == 0;
+}
+
+static int resolve_movie_path(void) {
+    file_t fd = fs_open("/pc/movie.dcmv", O_RDONLY);
+    const char *base_try = "/pc/movie.dcmv";
+    if (fd < 0) {
+        fd = fs_open("/cd/movie.dcmv", O_RDONLY);
+        base_try = "/cd/movie.dcmv";
+    }
+
+    strncpy(movie_path, base_try, sizeof(movie_path) - 1);
+    movie_path[sizeof(movie_path) - 1] = '\0';
+
+    if (fd < 0) {
+        printf("⚠️ movie.dcmv not found on either /pc or /cd.\n");
+        movie_path[0] = '\0';
+        return -1;
+    }
+
+    fs_close(fd);
+    return 0;
 }
 
 static int load_header(void) {
@@ -149,6 +170,39 @@ static size_t audio_cb(snd_stream_hnd_t hnd, uintptr_t l, uintptr_t r, size_t re
     return fs_read(audio_fd_left, (void *)l, req);
 }
 
+static void seek_audio_to_current_frame(void) {
+    if (audio_channels <= 0) return;
+
+    int current_frame = dcfmv_frame_index(dcfmv_current);
+    double samples_exact = ((double)current_frame * (double)sample_rate) / (double)fps;
+    uint32_t samples_i = (uint32_t)(samples_exact + 0.5);
+    uint32_t bytes_per_channel = (samples_i / 2);
+    bytes_per_channel = (bytes_per_channel + 15) & ~0xF;
+
+    long left_offset = audio_offset + (long)bytes_per_channel;
+    if (left_offset > (audio_offset + left_channel_size))
+        left_offset = audio_offset + left_channel_size;
+
+    long right_offset = audio_offset + left_channel_size + (long)bytes_per_channel;
+    long right_limit = audio_offset + (long)left_channel_size * 2;
+    if (right_offset > right_limit)
+        right_offset = right_limit;
+
+    if (audio_fd_left >= 0) {
+        fs_close(audio_fd_left);
+        audio_fd_left = fs_open(movie_path, O_RDONLY);
+        if (audio_fd_left >= 0)
+            fs_seek(audio_fd_left, left_offset, SEEK_SET);
+    }
+
+    if (audio_channels == 2 && audio_fd_right >= 0) {
+        fs_close(audio_fd_right);
+        audio_fd_right = fs_open(movie_path, O_RDONLY);
+        if (audio_fd_right >= 0)
+            fs_seek(audio_fd_right, right_offset, SEEK_SET);
+    }
+}
+
 static void wait_exit(void) {
     static uint16_t prev_buttons = 0;
     maple_device_t *dev = maple_enum_type(0, MAPLE_FUNC_CONTROLLER);
@@ -176,9 +230,11 @@ static void wait_exit(void) {
             frame_timer_anchor = now;
             atomic_store(&audio_start_time_ms, audio_channels > 0 ? frame_ms : 0.0);
             if (audio_channels > 0) {
+                seek_audio_to_current_frame();
                 thd_sleep(2);
                 if (!audio_started) {
                     snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
+                    snd_stream_volume(stream, 255);
                     audio_started = 1;
                 }
                 atomic_store(&audio_muted, 0);
@@ -214,9 +270,14 @@ int main(int argc, char **argv) {
         printf("Failed to allocate FMV state\n");
         return -1;
     }
-    dcfmv_open(dcfmv_current, VIDEO_FILE);
+    if (resolve_movie_path() < 0) {
+        dcfmv_destroy(dcfmv_current);
+        return -1;
+    }
 
-    video_fd = fs_open(VIDEO_FILE, O_RDONLY);
+    dcfmv_open(dcfmv_current, movie_path);
+
+    video_fd = fs_open(movie_path, O_RDONLY);
     if (video_fd < 0 || load_header() < 0) return -1;
 
     vid_set_mode(video_width == 320 ? DM_320x240 : DM_640x480, PM_RGB565);
@@ -239,7 +300,7 @@ int main(int argc, char **argv) {
     fs_seek(video_fd, save_pos, SEEK_SET);
 
     if (audio_channels > 0) {
-        audio_fd_left = fs_open(VIDEO_FILE, O_RDONLY);
+        audio_fd_left = fs_open(movie_path, O_RDONLY);
         if (audio_fd_left < 0) {
             printf("Failed to open audio left fd\n");
             return -1;
@@ -247,7 +308,7 @@ int main(int argc, char **argv) {
         fs_seek(audio_fd_left, audio_offset, SEEK_SET);
 
         if (audio_channels == 2) {
-            audio_fd_right = fs_open(VIDEO_FILE, O_RDONLY);
+            audio_fd_right = fs_open(movie_path, O_RDONLY);
             if (audio_fd_right < 0) {
                 printf("Failed to open audio right fd\n");
                 return -1;
@@ -275,6 +336,7 @@ int main(int argc, char **argv) {
         stream = snd_stream_alloc(NULL, 4096);
         snd_stream_set_callback_direct(stream, audio_cb);
         snd_stream_start_adpcm(stream, sample_rate, audio_channels == 2 ? 1 : 0);
+        snd_stream_volume(stream, 255);
         audio_started = 1;
     }
 
@@ -316,9 +378,6 @@ int main(int argc, char **argv) {
     while (atomic_load(&frame_index) < num_total_frames) {
         wait_exit();
         dcfmv_tick(dcfmv_current);
-        if (audio_channels > 0 && !dcfmv_is_paused(dcfmv_current)) {
-            snd_stream_poll(stream);
-        }
     }
 
     printf("Playback finished\n");
