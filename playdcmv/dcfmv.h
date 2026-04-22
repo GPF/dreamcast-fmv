@@ -22,6 +22,11 @@ enum dcfmv_buf_state {
     DCFMV_BUF_READY = 2
 };
 
+enum dcfmv_present_mode {
+    DCFMV_PRESENT_CLIENT = 0,
+    DCFMV_PRESENT_OWNED = 1
+};
+
 typedef struct dcfmv_preload_job {
     int frame;
     int generation;
@@ -105,11 +110,12 @@ typedef struct dcfmv {
     atomic_int seek_settle_frames;
     int worker_idle_ticks;
     int g_playback_started;
+    enum dcfmv_present_mode present_mode;
 } dcfmv_t;
 
 extern dcfmv_t *dcfmv_current;
 
-dcfmv_t *dcfmv_create(void);
+dcfmv_t *dcfmv_create(enum dcfmv_present_mode present_mode);
 void dcfmv_destroy(dcfmv_t *fmv);
 void dcfmv_control_reset(void);
 

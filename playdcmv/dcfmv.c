@@ -56,7 +56,7 @@ static inline int dcfmv_total_to_unique_frame(dcfmv_t *fmv, int total_frame) {
     return fmv->GTotalToUnique[total_frame];
 }
 
-dcfmv_t *dcfmv_create(void) {
+dcfmv_t *dcfmv_create(enum dcfmv_present_mode present_mode) {
     dcfmv_t *fmv = calloc(1, sizeof(*fmv));
     if (!fmv) return NULL;
 
@@ -93,6 +93,7 @@ dcfmv_t *dcfmv_create(void) {
     fmv->g_disable_fmv_audio = 0;
     fmv->audio_started = 0;
     fmv->use_zstd = 0;
+    fmv->present_mode = present_mode;
     if (!dcfmv_zstd_dctx) {
         dcfmv_zstd_dctx = ZSTD_createDCtx();
     }
@@ -779,24 +780,26 @@ void dcfmv_render_current_video(dcfmv_t *fmv) {
         fmv->last_unique_frame_drawn = unique;
     }
 
+    if (fmv->present_mode == DCFMV_PRESENT_OWNED) {
+        pvr_scene_begin();
+        pvr_list_begin(PVR_LIST_OP_POLY);
+    }
+
     pvr_dr_state_t dr;
     pvr_dr_init(&dr);
     uintptr_t sq_dest_addr = (uintptr_t)SQ_MASK_DEST(PVR_TA_INPUT);
 
     if (state == DCFMV_BUF_READY || fmv->last_unique_frame_drawn >= 0) {
-        pvr_scene_begin();
-        pvr_list_begin(PVR_LIST_OP_POLY);
         sq_fast_cpy((void *)sq_dest_addr, &fmv->hdr, 1);
         sq_fast_cpy((void *)sq_dest_addr, fmv->vert, 4);
-        pvr_dr_finish();
-        pvr_list_finish();
-        pvr_scene_finish();
     } else {
-        pvr_scene_begin();
-        pvr_list_begin(PVR_LIST_OP_POLY);
         sq_fast_cpy((void *)sq_dest_addr, &fmv->fallback_hdr, 1);
         sq_fast_cpy((void *)sq_dest_addr, fmv->fallback_vert, 4);
-        pvr_dr_finish();
+    }
+
+    pvr_dr_finish();
+
+    if (fmv->present_mode == DCFMV_PRESENT_OWNED) {
         pvr_list_finish();
         pvr_scene_finish();
     }

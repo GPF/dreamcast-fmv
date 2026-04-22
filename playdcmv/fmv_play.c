@@ -291,7 +291,7 @@ int main(int argc, char **argv) {
     (void)argc;
     (void)argv;
 
-    dcfmv_current = dcfmv_create();
+    dcfmv_current = dcfmv_create(DCFMV_PRESENT_OWNED);
     if (!dcfmv_current) {
         printf("Failed to allocate FMV state\n");
         return -1;
