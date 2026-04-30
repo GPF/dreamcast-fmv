@@ -1,6 +1,10 @@
 #ifndef DCFMV_H
 #define DCFMV_H
 
+#ifndef DCFMV_DEBUG_LOGS
+#define DCFMV_DEBUG_LOGS 0
+#endif
+
 #include <kos.h>
 #include <dc/pvr.h>
 #include <dc/sound/stream.h>
@@ -10,11 +14,6 @@
 #define DCFMV_MAGIC "DCMV"
 #define DCFMV_NUM_BUFFERS 24
 #define DCFMV_RING_CAPACITY (DCFMV_NUM_BUFFERS + 1)
-#define NUM_BUFFERS DCFMV_NUM_BUFFERS
-#define RING_CAPACITY DCFMV_RING_CAPACITY
-#define BUF_EMPTY DCFMV_BUF_EMPTY
-#define BUF_LOADING DCFMV_BUF_LOADING
-#define BUF_READY DCFMV_BUF_READY
 
 enum dcfmv_buf_state {
     DCFMV_BUF_EMPTY = 0,
@@ -99,6 +98,9 @@ typedef struct dcfmv {
     uint32_t vfd_last_end;
     long last_audio_left_pos;
     long last_audio_right_pos;
+    int audio_unmute_pending;
+    int audio_clock_resume_pending;
+    _Atomic double audio_clock_resume_until_ms;
 
     int g_is_paused;
     _Atomic int preload_paused;
@@ -127,10 +129,13 @@ int dcfmv_take_seek_request(dcfmv_t *fmv);
 void dcfmv_set_paused(dcfmv_t *fmv, int paused);
 void dcfmv_toggle_pause(dcfmv_t *fmv);
 void dcfmv_set_audio_muted(dcfmv_t *fmv, int muted);
+void dcfmv_set_audio_volume(dcfmv_t *fmv, int volume);
 void dcfmv_set_audio_clock_mode(dcfmv_t *fmv, int use_audio_clock);
+void dcfmv_reanchor_clock_to_current_frame(dcfmv_t *fmv);
 void dcfmv_set_preload_paused(dcfmv_t *fmv, int paused);
 void dcfmv_set_seek_settle_frames(dcfmv_t *fmv, int frames);
 int dcfmv_handle_seek_settle(dcfmv_t *fmv, int paused);
+void dcfmv_log_state(const char *tag, dcfmv_t *fmv);
 int dcfmv_load_frame(dcfmv_t *fmv, int unique_frame, int buf_index);
 bool dcfmv_schedule_frame_preload(dcfmv_t *fmv, int frame);
 bool dcfmv_schedule_frame_preload_with_generation(dcfmv_t *fmv, int frame, int generation);
@@ -142,6 +147,37 @@ double dcfmv_tick(dcfmv_t *fmv);
 double dcfmv_wait_until(dcfmv_t *fmv);
 size_t dcfmv_audio_poll(dcfmv_t *fmv);
 
+/*
+ * dcfmv_audio_init() - allocate and start the KOS ADPCM stream.
+ *
+ * Call this after dcfmv_open() has populated the header fields
+ * (sample_rate, audio_channels, soundbufferalloc).  The function
+ * allocates the stream handle, registers the built-in audio_cb, and
+ * calls snd_stream_start_adpcm().
+ *
+ * Returns 0 on success, -1 if audio_channels == 0 (no-op).
+ */
+int  dcfmv_audio_init(dcfmv_t *fmv);
+
+/*
+ * dcfmv_audio_stop_stream() - stop the active ADPCM DMA stream.
+ * This keeps the file descriptors open so playback can resume later.
+ * Safe to call even if dcfmv_audio_init() was never called.
+ */
+void dcfmv_audio_stop_stream(dcfmv_t *fmv);
+
+/*
+ * dcfmv_audio_start_stream() - start or resume the active ADPCM DMA stream.
+ * Safe to call even if the stream was already running.
+ */
+int  dcfmv_audio_start_stream(dcfmv_t *fmv);
+
+/*
+ * dcfmv_audio_stop() - stop and release the KOS ADPCM stream.
+ * Safe to call even if dcfmv_audio_init() was never called.
+ */
+void dcfmv_audio_stop(dcfmv_t *fmv);
+
 const char *dcfmv_path(dcfmv_t *fmv);
 const char *dcfmv_header(dcfmv_t *fmv);
 int dcfmv_frame_index(dcfmv_t *fmv);
@@ -149,72 +185,5 @@ double dcfmv_frame_duration_ms(dcfmv_t *fmv);
 int dcfmv_is_paused(dcfmv_t *fmv);
 int dcfmv_playback_started(dcfmv_t *fmv);
 double dcfmv_ps_ms(void);
-
-#ifdef DCFMV_USE_STATE_MACROS
-#define video_fd              dcfmv_current->video_fd
-#define audio_fd_left         dcfmv_current->audio_fd_left
-#define audio_fd_right        dcfmv_current->audio_fd_right
-#define left_channel_size     dcfmv_current->left_channel_size
-#define compressed_buffer     dcfmv_current->compressed_buffer
-#define frame_buffer          dcfmv_current->frame_buffer
-#define frame_offsets         dcfmv_current->frame_offsets
-#define frame_durations       dcfmv_current->frame_durations
-#define last_unique_frame_drawn dcfmv_current->last_unique_frame_drawn
-#define buf_ref_count         dcfmv_current->buf_ref_count
-#define displayed_total_frame dcfmv_current->displayed_total_frame
-#define frame_index           dcfmv_current->frame_index
-#define fps                   dcfmv_current->fps
-#define frame_type            dcfmv_current->frame_type
-#define video_width           dcfmv_current->video_width
-#define video_height          dcfmv_current->video_height
-#define content_width         dcfmv_current->content_width
-#define content_height        dcfmv_current->content_height
-#define sample_rate           dcfmv_current->sample_rate
-#define audio_channels        dcfmv_current->audio_channels
-#define g_disable_fmv_audio   dcfmv_current->g_disable_fmv_audio
-#define g_enable_mp3          dcfmv_current->g_enable_mp3
-#define num_unique_frames     dcfmv_current->num_unique_frames
-#define num_total_frames      dcfmv_current->num_total_frames
-#define video_frame_size      dcfmv_current->video_frame_size
-#define max_compressed_size   dcfmv_current->max_compressed_size
-#define audio_offset          dcfmv_current->audio_offset
-#define stream                dcfmv_current->stream
-#define audio_start_time_ms   dcfmv_current->audio_start_time_ms
-#define audio_muted           dcfmv_current->audio_muted
-#define use_audio_clock       dcfmv_current->use_audio_clock
-#define frame_duration        dcfmv_current->frame_duration
-#define frame_timer_anchor    dcfmv_current->frame_timer_anchor
-#define buf_state             dcfmv_current->buf_state
-#define pvr_txr               dcfmv_current->pvr_txr
-#define hdr                   dcfmv_current->hdr
-#define fallback_hdr          dcfmv_current->fallback_hdr
-#define vert                  dcfmv_current->vert
-#define fallback_vert         dcfmv_current->fallback_vert
-#define soundbufferalloc      dcfmv_current->soundbufferalloc
-#define audio_started         dcfmv_current->audio_started
-#define use_zstd              dcfmv_current->use_zstd
-#define g_audio_left_on       dcfmv_current->g_audio_left_on
-#define g_audio_right_on      dcfmv_current->g_audio_right_on
-#define g_audio_movie_vol     dcfmv_current->g_audio_movie_vol
-#define fps_num               dcfmv_current->fps_num
-#define fps_den               dcfmv_current->fps_den
-#define frame_duration_ms     dcfmv_current->frame_duration_ms
-#define GTotalToUnique        dcfmv_current->GTotalToUnique
-#define vfd_last_end          dcfmv_current->vfd_last_end
-#define last_audio_left_pos   dcfmv_current->last_audio_left_pos
-#define last_audio_right_pos  dcfmv_current->last_audio_right_pos
-#define preload_ring          dcfmv_current->preload_ring
-#define preload_ring_head     dcfmv_current->preload_ring_head
-#define preload_ring_tail     dcfmv_current->preload_ring_tail
-#define g_is_paused           dcfmv_current->g_is_paused
-#define preload_paused        dcfmv_current->preload_paused
-#define GSeekGeneration       dcfmv_current->GSeekGeneration
-#define GSeeking              dcfmv_current->GSeeking
-#define GSeekTargetFrame      dcfmv_current->GSeekTargetFrame
-#define seek_request          dcfmv_current->seek_request
-#define seek_in_progress      dcfmv_current->seek_in_progress
-#define seek_settle_frames    dcfmv_current->seek_settle_frames
-#define g_playback_started    dcfmv_current->g_playback_started
-#endif
 
 #endif /* DCFMV_H */
