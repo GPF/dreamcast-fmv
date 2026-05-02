@@ -19,9 +19,9 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-# AUDIOINPUT="input/dle.ogg" # Example for audio input
-INPUT="input/60_JW4_Imagine_SB_UPRW255017EH-thedigitaltheater.mp4" # Path to input video file (MP4)
-AUDIOINPUT=$INPUT
+AUDIOINPUT="input/dle.ogg" # Example for audio input
+INPUT="input/dle.m2v" # Path to input video file (MP4)
+# AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
 TEMP_DIR="temp_frames"
@@ -33,8 +33,8 @@ FORMAT="yuv422" # Options: rgb565, yuv422
 USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=640 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=480
+SCALE_WIDTH=320 # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT=240
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
@@ -42,8 +42,8 @@ SCALE_HEIGHT=480
 # VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
 
 # Audio Settings
-AUDIO_RATE=44100
-CHANNELS=2
+AUDIO_RATE=22050
+CHANNELS=1
 
 USE_DEDUP=false  # Set to false to disable frame deduplication
 COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
@@ -327,27 +327,18 @@ esac
 
 echo "✅ Converted frames complete."
 
-# Extract and convert audio
-AUDIO_OUT="$OUTPUT_DIR/audio.dca"
-if [ "$SKIP_IF_EXISTS" = true ] && [[ -f "$AUDIO_OUT" ]]; then
-    echo "✅ Found existing audio.dca, skipping audio extraction."
+# Extract PCM WAV audio for chunk-local ADPCM encoding inside pack_dcmv
+AUDIO_WAV="$TEMP_DIR/temp.wav"
+if [ "$SKIP_IF_EXISTS" = true ] && [[ -f "$AUDIO_WAV" ]]; then
+    echo "✅ Found existing temp.wav, skipping audio extraction."
 else
-    echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
-    
-    # Test: Use FFmpeg's adpcm_yamaha with WAV format
-    # ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" \
-    #   -ac "$CHANNELS" -ar "$AUDIO_RATE" \
-    #   -c:a adpcm_yamaha -f wav -y "$AUDIO_OUT"
-    
-    # Original method (commented out for comparison)
-    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
-    "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
-      -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
+    echo "🔊 Extracting audio to PCM WAV (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
+    ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$AUDIO_WAV" || exit 1
 fi
 
 echo "📦 Packing into compressed .dcmv format..."
 "$PACKER" "$FINAL_OUTPUT" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$SCALE_WIDTH" "$SCALE_HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
-  "$OUTPUT_DIR/frame%06d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" "$CHUNK_DURATION" || exit 1
+  "$OUTPUT_DIR/frame%06d.${EXT}" "$AUDIO_WAV" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" "$CHUNK_DURATION" || exit 1
 
 
 # Clean up intermediate files

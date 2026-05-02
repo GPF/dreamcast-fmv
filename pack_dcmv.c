@@ -42,7 +42,7 @@
  *   pack_dcmv_v1 <output.dcmv> <frame_type> <width> <height>
  *                <scale_width> <scale_height> <fps>
  *                <sample_rate> <channels>
- *                <frame_pattern> <audio_file> <frame_durations.txt>
+ *                <frame_pattern> <audio_pcm_wav> <frame_durations.txt>
  *                <compression> <chunk_duration>
  *
  * Author: Troy Davis (gpf)
@@ -55,6 +55,8 @@
 #include <string.h>
 #include <errno.h>
 #include <math.h>
+#include <limits.h>
+#include <unistd.h>
 
 #include <lz4.h>
 #include <lz4hc.h>
@@ -107,6 +109,16 @@ typedef struct __attribute__((packed)) {
     uint32_t num_frames;            // TOTAL frames in chunk
 } ChunkIndexEntry;
 
+typedef struct {
+    uint16_t audio_format;
+    uint16_t channels;
+    uint32_t sample_rate;
+    uint16_t bits_per_sample;
+    uint16_t block_align;
+    long data_offset;
+    uint32_t data_size;
+} WAVInfo;
+
 // Global state
 static uint16_t *durations = NULL;
 static uint32_t num_unique_frames = 0;
@@ -120,6 +132,14 @@ static size_t get_texture_data_size(const char* filename);
 static int load_durations(const char *path);
 static void pad_to_alignment(FILE *fp, size_t alignment);
 static int total_to_unique_frame(int total_frame);
+static int parse_wav_file(FILE *fp, WAVInfo *info);
+static int write_pcm_wav(const char *path, const uint8_t *pcm, size_t pcm_bytes,
+                         uint16_t channels, uint32_t sample_rate, uint16_t bits_per_sample);
+static int run_dcaconv_chunk(const char *dcaconv_path, const char *wav_path, const char *dca_path,
+                             uint16_t sample_rate, uint16_t channels);
+static int load_dca_payload(const char *path, uint8_t *payload, size_t payload_cap,
+                            uint16_t channels, size_t *per_channel_bytes);
+static void dirname_from_path(const char *path, char *dir, size_t dir_size);
 
 // ============================================================================
 // Helper Functions
@@ -145,6 +165,201 @@ static int total_to_unique_frame(int total_frame) {
         }
     }
     return (int)(num_unique_frames - 1);
+}
+
+static int parse_wav_file(FILE *fp, WAVInfo *info) {
+    uint8_t header[12];
+    int have_fmt = 0;
+    int have_data = 0;
+
+    if (!fp || !info)
+        return 0;
+
+    memset(info, 0, sizeof(*info));
+
+    if (fseek(fp, 0, SEEK_SET) != 0)
+        return 0;
+    if (fread(header, 1, sizeof(header), fp) != sizeof(header))
+        return 0;
+    if (memcmp(header, "RIFF", 4) != 0 || memcmp(header + 8, "WAVE", 4) != 0)
+        return 0;
+
+    while (!have_fmt || !have_data) {
+        uint8_t chunk_hdr[8];
+        uint32_t chunk_size = 0;
+
+        if (fread(chunk_hdr, 1, sizeof(chunk_hdr), fp) != sizeof(chunk_hdr))
+            break;
+
+        memcpy(&chunk_size, chunk_hdr + 4, sizeof(chunk_size));
+
+        if (memcmp(chunk_hdr, "fmt ", 4) == 0) {
+            uint8_t fmt_buf[40];
+            if (chunk_size < 16 || chunk_size > sizeof(fmt_buf))
+                return 0;
+            if (fread(fmt_buf, 1, chunk_size, fp) != chunk_size)
+                return 0;
+            memcpy(&info->audio_format, fmt_buf + 0, sizeof(info->audio_format));
+            memcpy(&info->channels, fmt_buf + 2, sizeof(info->channels));
+            memcpy(&info->sample_rate, fmt_buf + 4, sizeof(info->sample_rate));
+            memcpy(&info->block_align, fmt_buf + 12, sizeof(info->block_align));
+            memcpy(&info->bits_per_sample, fmt_buf + 14, sizeof(info->bits_per_sample));
+            have_fmt = 1;
+        } else if (memcmp(chunk_hdr, "data", 4) == 0) {
+            info->data_offset = ftell(fp);
+            info->data_size = chunk_size;
+            if (fseek(fp, (long)chunk_size, SEEK_CUR) != 0)
+                return 0;
+            have_data = 1;
+        } else {
+            if (fseek(fp, (long)chunk_size, SEEK_CUR) != 0)
+                return 0;
+        }
+
+        if (chunk_size & 1u) {
+            if (fseek(fp, 1, SEEK_CUR) != 0)
+                return 0;
+        }
+    }
+
+    return have_fmt && have_data;
+}
+
+static int write_pcm_wav(const char *path, const uint8_t *pcm, size_t pcm_bytes,
+                         uint16_t channels, uint32_t sample_rate, uint16_t bits_per_sample) {
+    FILE *fp;
+    uint32_t riff_size;
+    uint32_t fmt_size = 16;
+    uint16_t audio_format = 1;
+    uint32_t byte_rate;
+    uint16_t block_align;
+
+    if (!path || !pcm)
+        return -1;
+
+    fp = fopen(path, "wb");
+    if (!fp)
+        return -1;
+
+    block_align = (uint16_t)(channels * (bits_per_sample / 8));
+    byte_rate = sample_rate * (uint32_t)block_align;
+    riff_size = 36u + (uint32_t)pcm_bytes;
+
+    fwrite("RIFF", 1, 4, fp);
+    fwrite(&riff_size, 4, 1, fp);
+    fwrite("WAVE", 1, 4, fp);
+    fwrite("fmt ", 1, 4, fp);
+    fwrite(&fmt_size, 4, 1, fp);
+    fwrite(&audio_format, 2, 1, fp);
+    fwrite(&channels, 2, 1, fp);
+    fwrite(&sample_rate, 4, 1, fp);
+    fwrite(&byte_rate, 4, 1, fp);
+    fwrite(&block_align, 2, 1, fp);
+    fwrite(&bits_per_sample, 2, 1, fp);
+    fwrite("data", 1, 4, fp);
+    fwrite(&pcm_bytes, 4, 1, fp);
+
+    if (pcm_bytes && fwrite(pcm, 1, pcm_bytes, fp) != pcm_bytes) {
+        fclose(fp);
+        return -1;
+    }
+
+    fclose(fp);
+    return 0;
+}
+
+static int run_dcaconv_chunk(const char *dcaconv_path, const char *wav_path, const char *dca_path,
+                             uint16_t sample_rate, uint16_t channels) {
+    char cmd[PATH_MAX * 3];
+    int rc;
+
+    if (!dcaconv_path || !wav_path || !dca_path)
+        return -1;
+
+    snprintf(cmd, sizeof(cmd),
+             "\"%s\" --long --rate %u -c %u -f ADPCM -i \"%s\" -o \"%s\"",
+             dcaconv_path, (unsigned)sample_rate, (unsigned)channels, wav_path, dca_path);
+    rc = system(cmd);
+    return rc == 0 ? 0 : -1;
+}
+
+static int load_dca_payload(const char *path, uint8_t *payload, size_t payload_cap,
+                            uint16_t channels, size_t *per_channel_bytes) {
+    FILE *fp;
+    long start = 0;
+    long end;
+    long payload_total;
+    char head[4];
+
+    if (!path || !payload || !per_channel_bytes)
+        return -1;
+
+    fp = fopen(path, "rb");
+    if (!fp)
+        return -1;
+
+    if (fread(head, 1, 4, fp) == 4 && memcmp(head, "DcAF", 4) == 0) {
+        if (fseek(fp, 0x40, SEEK_SET) != 0) {
+            fclose(fp);
+            return -1;
+        }
+        start = 0x40;
+    } else {
+        rewind(fp);
+    }
+
+    if (fseek(fp, 0, SEEK_END) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    end = ftell(fp);
+    if (end < start) {
+        fclose(fp);
+        return -1;
+    }
+
+    payload_total = end - start;
+    if ((size_t)payload_total > payload_cap) {
+        fclose(fp);
+        return -1;
+    }
+    if (payload_total <= 0 || (payload_total % channels) != 0) {
+        fclose(fp);
+        return -1;
+    }
+
+    if (fseek(fp, start, SEEK_SET) != 0) {
+        fclose(fp);
+        return -1;
+    }
+    if (fread(payload, 1, (size_t)payload_total, fp) != (size_t)payload_total) {
+        fclose(fp);
+        return -1;
+    }
+
+    fclose(fp);
+    *per_channel_bytes = (size_t)payload_total / (size_t)channels;
+    return 0;
+}
+
+static void dirname_from_path(const char *path, char *dir, size_t dir_size) {
+    const char *slash;
+    size_t len;
+
+    if (!dir || dir_size == 0)
+        return;
+
+    slash = path ? strrchr(path, '/') : NULL;
+    if (!slash) {
+        snprintf(dir, dir_size, ".");
+        return;
+    }
+
+    len = (size_t)(slash - path);
+    if (len >= dir_size)
+        len = dir_size - 1;
+    memcpy(dir, path, len);
+    dir[len] = '\0';
 }
 
 // Function to load frame data, stripping DT header if present
@@ -299,11 +514,11 @@ int main(int argc, char **argv) {
         printf("Usage: %s <output.dcmv> <frame_type> <width> <height> "
                "<scale_width> <scale_height> <fps> "
                "<sample_rate> <channels> "
-               "<frame_pattern> <audio_file> <frame_durations.txt> "
+               "<frame_pattern> <audio_pcm_wav> <frame_durations.txt> "
                "<compression> <chunk_duration>\n", argv[0]);
         printf("\nExample:\n");
         printf("  %s movie.dcmv 1 320 240 320 240 23.97 44100 1 \\\n", argv[0]);
-        printf("     frames/frame%%05d.dt audio.dca durations.txt lz4 2.0\n");
+        printf("     frames/frame%%05d.dt temp.wav durations.txt lz4 2.0\n");
         printf("\nCompression: lz4 or zstd\n");
         printf("Chunk duration: seconds per chunk (e.g., 1.0, 2.0, 5.0)\n");
         return 1;
@@ -376,36 +591,47 @@ int main(int argc, char **argv) {
     printf("   Frames per chunk: %d\n", frames_per_chunk);
     printf("   Total chunks: %d\n", num_chunks);
 
-    // Open audio file
+    // Open source PCM WAV file
     FILE *audio_fp = fopen(audio_path, "rb");
+    WAVInfo wav_info;
+    uint64_t total_audio_samples = 0;
+    char packer_dir[PATH_MAX];
+    char dcaconv_path[PATH_MAX];
+
     if (!audio_fp) {
         perror("Audio open failed");
         return 1;
     }
-
-    // Skip DcAF header if present (64 bytes)
-    long audio_data_start = 0;
-    {
-        char head[4];
-        size_t got = fread(head, 1, 4, audio_fp);
-        if (got == 4 && memcmp(head, "DcAF", 4) == 0) {
-            fseek(audio_fp, 0x40, SEEK_SET);
-            printf("🔊 Skipping 64-byte DcAF header from %s\n", audio_path);
-        } else {
-            rewind(audio_fp);
-        }
-        audio_data_start = ftell(audio_fp);
-        if (audio_data_start < 0) audio_data_start = 0;
+    if (!parse_wav_file(audio_fp, &wav_info)) {
+        fprintf(stderr, "❌ Failed to parse PCM WAV audio: %s\n", audio_path);
+        fclose(audio_fp);
+        return 1;
     }
+    if (wav_info.audio_format != 1 || wav_info.bits_per_sample != 16) {
+        fprintf(stderr, "❌ pack_dcmv expects PCM S16LE WAV input (format=%u bits=%u)\n",
+                (unsigned)wav_info.audio_format, (unsigned)wav_info.bits_per_sample);
+        fclose(audio_fp);
+        return 1;
+    }
+    if (wav_info.channels != channels || wav_info.sample_rate != sample_rate) {
+        fprintf(stderr, "❌ WAV audio format mismatch: wav=%uch/%uHz args=%uch/%uHz\n",
+                (unsigned)wav_info.channels, (unsigned)wav_info.sample_rate,
+                (unsigned)channels, (unsigned)sample_rate);
+        fclose(audio_fp);
+        return 1;
+    }
+    total_audio_samples = wav_info.block_align ? ((uint64_t)wav_info.data_size / (uint64_t)wav_info.block_align) : 0;
+    printf("🔊 Audio WAV: %uHz, %u channel(s), %llu samples (%u bytes)\n",
+           (unsigned)wav_info.sample_rate,
+           (unsigned)wav_info.channels,
+           (unsigned long long)total_audio_samples,
+           (unsigned)wav_info.data_size);
 
-    // Get total audio size
-    fseek(audio_fp, 0, SEEK_END);
-    long audio_end = ftell(audio_fp);
-    if (audio_end < 0) audio_end = 0;
-    long total_audio_size = (audio_end - audio_data_start);
-    if (total_audio_size < 0) total_audio_size = 0;
-    fseek(audio_fp, audio_data_start, SEEK_SET);
-    printf("🔊 Audio file size: %ld bytes\n", total_audio_size);
+    dirname_from_path(argv[0], packer_dir, sizeof(packer_dir));
+    snprintf(dcaconv_path, sizeof(dcaconv_path), "%s/dcaconv", packer_dir);
+    if (access(dcaconv_path, X_OK) != 0) {
+        snprintf(dcaconv_path, sizeof(dcaconv_path), "dcaconv");
+    }
 
     // Determine frame size
     char filename[FRAME_FILENAME_MAX];
@@ -511,25 +737,38 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Audio buffer (allocate to worst-case per chunk, per channel)
-    // ADPCM 4-bit: bytes/sec per channel = sample_rate/2
+    // Audio buffers
+    // ADPCM 4-bit: bytes/sec per channel ~= sample_rate / 2
     const size_t bytes_per_sec_ch = (size_t)(sample_rate / 2);
     size_t max_audio_bytes_per_ch = (size_t)ceil((double)chunk_duration * (double)bytes_per_sec_ch);
-    if (max_audio_bytes_per_ch < 1) max_audio_bytes_per_ch = 1;
+    size_t max_chunk_samples = (size_t)ceil((double)chunk_duration * (double)sample_rate) + 8;
+    size_t max_pcm_bytes;
+    size_t max_encoded_total;
+    uint8_t *audio_buffer;
+    uint8_t *pcm_chunk_buffer;
+    uint8_t *encoded_audio_buffer;
 
-    // keep even + 32-aligned friendly
+    if (max_audio_bytes_per_ch < 1) max_audio_bytes_per_ch = 1;
     max_audio_bytes_per_ch = (max_audio_bytes_per_ch + 1) & ~((size_t)1);
     max_audio_bytes_per_ch = align_up_size(max_audio_bytes_per_ch, 32);
 
-    uint8_t *audio_buffer = (uint8_t *)malloc(max_audio_bytes_per_ch);
-    if (!audio_buffer) {
-        fprintf(stderr, "Memory allocation failed for audio_buffer\n");
+    max_pcm_bytes = align_up_size(max_chunk_samples * (size_t)wav_info.block_align, 32);
+    max_encoded_total = align_up_size(max_audio_bytes_per_ch, 32) * (size_t)channels;
+
+    audio_buffer = (uint8_t *)malloc(max_audio_bytes_per_ch);
+    pcm_chunk_buffer = (uint8_t *)malloc(max_pcm_bytes);
+    encoded_audio_buffer = (uint8_t *)malloc(max_encoded_total);
+    if (!audio_buffer || !pcm_chunk_buffer || !encoded_audio_buffer) {
+        fprintf(stderr, "Memory allocation failed for audio buffers\n");
         fclose(audio_fp);
         fclose(out);
         free(frame_offsets);
         free(chunk_index);
         free(frame_buf);
         free(compressed_buf);
+        free(audio_buffer);
+        free(pcm_chunk_buffer);
+        free(encoded_audio_buffer);
         if (cctx) ZSTD_freeCCtx(cctx);
         return 1;
     }
@@ -668,63 +907,115 @@ int main(int argc, char **argv) {
 pad_to_alignment(out, 32);
 
 {
-    const long per_ch_total = (channels == 2) ? (total_audio_size / 2) : total_audio_size;
+    uint64_t start_sample = (total_audio_samples * (uint64_t)start_frame) / (uint64_t)num_total_frames;
+    uint64_t end_sample   = (total_audio_samples * (uint64_t)end_frame) / (uint64_t)num_total_frames;
+    size_t chunk_samples;
+    size_t pcm_bytes;
+    size_t payload_bytes_per_ch = 0;
+    size_t written_bytes;
+    char chunk_wav_path[PATH_MAX];
+    char chunk_dca_path[PATH_MAX];
 
-    // Frame->byte mapping based on REAL file size (opaque ADPCM stream)
-    auto uint64_t byte_pos_for_frame(uint32_t tf) {
-        return ((uint64_t)tf * (uint64_t)per_ch_total) / (uint64_t)num_total_frames;
+    if (end_sample < start_sample)
+        end_sample = start_sample;
+    chunk_samples = (size_t)(end_sample - start_sample);
+    if (chunk_samples < 1)
+        chunk_samples = 1;
+
+    pcm_bytes = chunk_samples * (size_t)wav_info.block_align;
+    if (pcm_bytes > max_pcm_bytes) {
+        fprintf(stderr, "\n❌ PCM chunk too large (%zu > %zu) for chunk %d\n",
+                pcm_bytes, max_pcm_bytes, chunk_id);
+        free(frame_offsets);
+        free(chunk_index);
+        free(frame_buf);
+        free(compressed_buf);
+        free(audio_buffer);
+        free(pcm_chunk_buffer);
+        free(encoded_audio_buffer);
+        fclose(audio_fp);
+        fclose(out);
+        if (cctx) ZSTD_freeCCtx(cctx);
+        return 1;
     }
 
-    uint64_t start_b = byte_pos_for_frame(start_frame);
-    uint64_t end_b   = byte_pos_for_frame(end_frame);
+    if (fseek(audio_fp, wav_info.data_offset + (long)(start_sample * (uint64_t)wav_info.block_align), SEEK_SET) != 0 ||
+        fread(pcm_chunk_buffer, 1, pcm_bytes, audio_fp) != pcm_bytes) {
+        fprintf(stderr, "\n❌ Failed reading PCM chunk %d from %s\n", chunk_id, audio_path);
+        free(frame_offsets);
+        free(chunk_index);
+        free(frame_buf);
+        free(compressed_buf);
+        free(audio_buffer);
+        free(pcm_chunk_buffer);
+        free(encoded_audio_buffer);
+        fclose(audio_fp);
+        fclose(out);
+        if (cctx) ZSTD_freeCCtx(cctx);
+        return 1;
+    }
 
-    if (end_b < start_b) end_b = start_b;
-    size_t payload_bytes = (size_t)(end_b - start_b);
+    snprintf(chunk_wav_path, sizeof(chunk_wav_path), "/tmp/dcmv_chunk_%ld_%d.wav", (long)getpid(), chunk_id);
+    snprintf(chunk_dca_path, sizeof(chunk_dca_path), "/tmp/dcmv_chunk_%ld_%d.dca", (long)getpid(), chunk_id);
 
-    // ADPCM safety: align boundaries (start with 32; if still blasts, try 256)
-    const size_t ADPCM_ALIGN = 32;
+    if (write_pcm_wav(chunk_wav_path, pcm_chunk_buffer, pcm_bytes, channels, sample_rate, 16) != 0 ||
+        run_dcaconv_chunk(dcaconv_path, chunk_wav_path, chunk_dca_path, sample_rate, channels) != 0 ||
+        load_dca_payload(chunk_dca_path, encoded_audio_buffer, max_encoded_total, channels, &payload_bytes_per_ch) != 0) {
+        fprintf(stderr, "\n❌ Failed encoding chunk-local ADPCM for chunk %d\n", chunk_id);
+        remove(chunk_wav_path);
+        remove(chunk_dca_path);
+        free(frame_offsets);
+        free(chunk_index);
+        free(frame_buf);
+        free(compressed_buf);
+        free(audio_buffer);
+        free(pcm_chunk_buffer);
+        free(encoded_audio_buffer);
+        fclose(audio_fp);
+        fclose(out);
+        if (cctx) ZSTD_freeCCtx(cctx);
+        return 1;
+    }
 
-    // round start down, end down, so we don't ever jump into the middle of a block
-    start_b &= ~((uint64_t)ADPCM_ALIGN - 1);
-    end_b   &= ~((uint64_t)ADPCM_ALIGN - 1);
-    if (end_b < start_b) end_b = start_b;
+    remove(chunk_wav_path);
+    remove(chunk_dca_path);
 
-    payload_bytes = (size_t)(end_b - start_b);
-    if (payload_bytes < 1) payload_bytes = ADPCM_ALIGN;
+    written_bytes = align_up_size(payload_bytes_per_ch, 32);
+    if (written_bytes > max_audio_bytes_per_ch) {
+        fprintf(stderr, "\n❌ Encoded ADPCM chunk too large (%zu > %zu) for chunk %d\n",
+                written_bytes, max_audio_bytes_per_ch, chunk_id);
+        free(frame_offsets);
+        free(chunk_index);
+        free(frame_buf);
+        free(compressed_buf);
+        free(audio_buffer);
+        free(pcm_chunk_buffer);
+        free(encoded_audio_buffer);
+        fclose(audio_fp);
+        fclose(out);
+        if (cctx) ZSTD_freeCCtx(cctx);
+        return 1;
+    }
 
-    // what we write (pad up to 32B so player can copy in 32B units)
-    size_t written_bytes = align_up_size(payload_bytes, 32);
+    chunk_index[chunk_id].audio_size = (uint32_t)payload_bytes_per_ch;
 
-    // clamp for buffer safety
-    if (written_bytes > max_audio_bytes_per_ch) written_bytes = max_audio_bytes_per_ch;
-    if (payload_bytes > written_bytes) payload_bytes = written_bytes;
-
-    // Index should describe REAL payload bytes per channel
-    chunk_index[chunk_id].audio_size = (uint32_t)payload_bytes;
-
-    // Helper to write one channel payload
-    auto void write_channel(long base_off) {
-        // base_off is audio_data_start (+0 for L, +per_ch_total for R)
+    for (uint16_t ch = 0; ch < channels; ch++) {
         memset(audio_buffer, 0, written_bytes);
-
-        if ((long)start_b < per_ch_total) {
-            long avail = per_ch_total - (long)start_b;
-            size_t to_read = payload_bytes;
-            if ((long)to_read > avail) to_read = (size_t)avail;
-
-            fseek(audio_fp, base_off + (long)start_b, SEEK_SET);
-            fread(audio_buffer, 1, to_read, audio_fp);
+        memcpy(audio_buffer, encoded_audio_buffer + ((size_t)ch * payload_bytes_per_ch), payload_bytes_per_ch);
+        if (fwrite(audio_buffer, 1, written_bytes, out) != written_bytes) {
+            fprintf(stderr, "\n❌ Failed writing ADPCM chunk payload for chunk %d\n", chunk_id);
+            free(frame_offsets);
+            free(chunk_index);
+            free(frame_buf);
+            free(compressed_buf);
+            free(audio_buffer);
+            free(pcm_chunk_buffer);
+            free(encoded_audio_buffer);
+            fclose(audio_fp);
+            fclose(out);
+            if (cctx) ZSTD_freeCCtx(cctx);
+            return 1;
         }
-
-        // zero padding already in audio_buffer to written_bytes
-        fwrite(audio_buffer, 1, written_bytes, out);
-    };
-
-    if (channels == 1) {
-        write_channel(audio_data_start);
-    } else {
-        write_channel(audio_data_start);                 // LEFT
-        write_channel(audio_data_start + per_ch_total);  // RIGHT (planar)
     }
 }
 
@@ -787,6 +1078,8 @@ pad_to_alignment(out, 2048);
     free(frame_buf);
     free(compressed_buf);
     free(audio_buffer);
+    free(pcm_chunk_buffer);
+    free(encoded_audio_buffer);
     free(chunk_index);
     if (cctx) ZSTD_freeCCtx(cctx);
     fclose(out);
