@@ -5,6 +5,46 @@
 #define DCFMV_DEBUG_LOGS 0
 #endif
 
+#ifndef DCFMV_DEBUG_LOG_CHUNK
+#define DCFMV_DEBUG_LOG_CHUNK 1
+#endif
+
+#ifndef DCFMV_DEBUG_LOG_FMV
+#define DCFMV_DEBUG_LOG_FMV 1
+#endif
+
+#ifndef DCFMV_DEBUG_LOG_SEEK
+#define DCFMV_DEBUG_LOG_SEEK 1
+#endif
+
+#ifndef DCFMV_DEBUG_LOG_AUDIO
+#define DCFMV_DEBUG_LOG_AUDIO 1
+#endif
+
+#ifndef DCFMV_DEBUG_LOG_CHUNK_AUDIO
+#define DCFMV_DEBUG_LOG_CHUNK_AUDIO 1
+#endif
+
+#ifndef DCFMV_DEBUG_LOG_WORKER
+#define DCFMV_DEBUG_LOG_WORKER 1
+#endif
+
+#ifndef DCFMV_DEBUG_LOG_DECODE
+#define DCFMV_DEBUG_LOG_DECODE 0
+#endif
+
+#ifndef DCFMV_DEBUG_LOG_RENDER
+#define DCFMV_DEBUG_LOG_RENDER 0
+#endif
+
+#ifndef DCFMV_DEBUG_LOG_UPLOAD
+#define DCFMV_DEBUG_LOG_UPLOAD 0
+#endif
+
+#ifndef DCFMV_DEBUG_LOG_TIMING
+#define DCFMV_DEBUG_LOG_TIMING 0
+#endif
+
 #include <kos.h>
 #include <dc/pvr.h>
 #include <dc/sound/stream.h>
@@ -14,6 +54,34 @@
 #define DCFMV_MAGIC "DCMV"
 #define DCFMV_NUM_BUFFERS 24
 #define DCFMV_RING_CAPACITY (DCFMV_NUM_BUFFERS + 1)
+#define DCFMV_AUDIO_RING_SLOTS   12
+#define DCFMV_AUDIO_BUFFER_BYTES 4096
+
+/*
+ * Playback-facing metadata that remains stable even if the backing DCMV
+ * storage changes from per-frame tables to chunked tables.
+ */
+typedef struct dcfmv_media_info {
+    uint32_t version;
+    uint8_t compression_type;
+    uint8_t frame_type;
+    uint16_t tex_width;
+    uint16_t tex_height;
+    uint16_t content_width;
+    uint16_t content_height;
+    float fps;
+    uint16_t sample_rate;
+    uint16_t channels;
+    uint32_t num_unique_frames;
+    uint32_t num_total_frames;
+    uint32_t uncompressed_frame_size;
+    uint32_t max_compressed_frame_size;
+} dcfmv_media_info_t;
+
+enum dcfmv_backend_kind {
+    DCFMV_BACKEND_FRAMES = 0,
+    DCFMV_BACKEND_CHUNKS = 1
+};
 
 enum dcfmv_buf_state {
     DCFMV_BUF_EMPTY = 0,
@@ -32,6 +100,13 @@ typedef struct dcfmv_preload_job {
 } dcfmv_preload_job_t;
 typedef dcfmv_preload_job_t PreloadJob;
 
+typedef struct {
+    uint8_t    *left;
+    uint8_t    *right;
+    size_t      valid_bytes;
+    _Atomic int valid;
+} dcfmv_audio_slot_t;
+
 typedef struct dcfmv {
     dcfmv_preload_job_t preload_ring[DCFMV_RING_CAPACITY];
     atomic_int preload_ring_head;
@@ -45,7 +120,23 @@ typedef struct dcfmv {
     uint8_t *compressed_buffer;
     uint8_t *frame_buffer[DCFMV_NUM_BUFFERS];
     uint32_t *frame_offsets;
+    uint32_t *frame_sizes;
     uint16_t *frame_durations;
+    void *chunk_index_data;
+    void *chunk_cache_data;
+    uint32_t chunk_count;
+    uint32_t chunk_index_offset;
+    float chunk_duration;
+    int chunk_cache_slots;
+    uint32_t global_cache_tick;
+
+dcfmv_audio_slot_t  chunk_audio_ring[DCFMV_AUDIO_RING_SLOTS];
+atomic_int          chunk_audio_write_idx;
+atomic_int          chunk_audio_read_idx;
+size_t              chunk_audio_ring_read_pos;
+    int                 current_audio_chunk;
+    size_t              audio_chunk_read_pos;
+    _Atomic int         chunk_audio_refill_needed;
 
     int last_unique_frame_drawn;
     atomic_int buf_ref_count[DCFMV_NUM_BUFFERS];
@@ -68,6 +159,8 @@ typedef struct dcfmv {
     int max_compressed_size;
     int audio_offset;
     char path[256];
+    dcfmv_media_info_t media_info;
+    enum dcfmv_backend_kind backend_kind;
 
     pvr_ptr_t pvr_txr;
     pvr_poly_hdr_t hdr;
@@ -86,6 +179,10 @@ typedef struct dcfmv {
     int soundbufferalloc;
     volatile int audio_started;
     int use_zstd;
+    unsigned int audio_start_generation;
+    unsigned int audio_logged_start_generation;
+    unsigned int audio_logged_poll_generation;
+    unsigned int audio_logged_cb_generation;
 
     _Atomic int g_audio_left_on;
     _Atomic int g_audio_right_on;
@@ -136,16 +233,26 @@ void dcfmv_set_preload_paused(dcfmv_t *fmv, int paused);
 void dcfmv_set_seek_settle_frames(dcfmv_t *fmv, int frames);
 int dcfmv_handle_seek_settle(dcfmv_t *fmv, int paused);
 void dcfmv_log_state(const char *tag, dcfmv_t *fmv);
-int dcfmv_load_frame(dcfmv_t *fmv, int unique_frame, int buf_index);
+int dcfmv_load_frame(dcfmv_t *fmv, int total_frame, int buf_index);
 bool dcfmv_schedule_frame_preload(dcfmv_t *fmv, int frame);
 bool dcfmv_schedule_frame_preload_with_generation(dcfmv_t *fmv, int frame, int generation);
 void dcfmv_worker_step(dcfmv_t *fmv);
+void dcfmv_upload_current_video(dcfmv_t *fmv);
+void dcfmv_submit_current_video(dcfmv_t *fmv);
 void dcfmv_render_current_video(dcfmv_t *fmv);
 void dcfmv_seek_to_frame(dcfmv_t *fmv, int new_frame);
 void dcfmv_submit(dcfmv_t *fmv);
 double dcfmv_tick(dcfmv_t *fmv);
 double dcfmv_wait_until(dcfmv_t *fmv);
 size_t dcfmv_audio_poll(dcfmv_t *fmv);
+void dcfmv_reset_timing(dcfmv_t *fmv);
+void dcfmv_reset_render_tracking(dcfmv_t *fmv);
+void dcfmv_set_render_resources(dcfmv_t *fmv,
+                                pvr_ptr_t txr,
+                                const pvr_poly_hdr_t *hdr,
+                                const pvr_poly_hdr_t *fallback_hdr,
+                                const pvr_vertex_t *vert,
+                                const pvr_vertex_t *fallback_vert);
 
 /*
  * dcfmv_audio_init() - allocate and start the KOS ADPCM stream.
@@ -179,11 +286,22 @@ int  dcfmv_audio_start_stream(dcfmv_t *fmv);
 void dcfmv_audio_stop(dcfmv_t *fmv);
 
 const char *dcfmv_path(dcfmv_t *fmv);
-const char *dcfmv_header(dcfmv_t *fmv);
+const dcfmv_media_info_t *dcfmv_media_info(const dcfmv_t *fmv);
+enum dcfmv_backend_kind dcfmv_backend(const dcfmv_t *fmv);
 int dcfmv_frame_index(dcfmv_t *fmv);
+int dcfmv_total_to_unique(const dcfmv_t *fmv, int total_frame);
+int dcfmv_ms_to_total_frame_floor(const dcfmv_t *fmv, uint32_t ms);
 double dcfmv_frame_duration_ms(dcfmv_t *fmv);
 int dcfmv_is_paused(dcfmv_t *fmv);
 int dcfmv_playback_started(dcfmv_t *fmv);
+int dcfmv_audio_channels(const dcfmv_t *fmv);
+int dcfmv_audio_muted(const dcfmv_t *fmv);
+int dcfmv_audio_volume(const dcfmv_t *fmv);
+uint32_t dcfmv_audio_offset(const dcfmv_t *fmv);
+void dcfmv_set_audio_enabled(dcfmv_t *fmv, int enabled);
+void dcfmv_set_audio_channel_enabled(dcfmv_t *fmv, int channel, int enabled);
+int dcfmv_audio_channel_enabled(const dcfmv_t *fmv, int channel);
+int dcfmv_seek_active(const dcfmv_t *fmv);
 double dcfmv_ps_ms(void);
 
 #endif /* DCFMV_H */
