@@ -19,8 +19,8 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-# AUDIOINPUT="input/hayate.ogg" # Example for audio input
-INPUT="input/YTDown.com_YouTube_Not-Broken_Media_xZi2Xpu6qKs_001_1080p_30fps.mp4" # Path to input video file (MP4)
+INPUT="input/JURASSIC20REBIRTH20-2020Ultra5D.mp4" # Path to input video file
+# AUDIOINPUT="input/101692_105419_extras.ogg" # Example for audio input
 AUDIOINPUT=$INPUT
 OUTPUT_DIR="output"
 UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
@@ -28,13 +28,13 @@ TEMP_DIR="temp_frames"
 FINAL_OUTPUT="./playdcmv/movie.dcmv"
 
 # Video Settings
-FPS=30
+FPS=24
 FORMAT="yuv422" # Options: rgb565, yuv422
 USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=640 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=480
+SCALE_WIDTH=320 # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT=240
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
@@ -42,19 +42,22 @@ SCALE_HEIGHT=480
 # VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
 
 # Audio Settings
-AUDIO_RATE=22050
-CHANNELS=2
+AUDIO_RATE=44100
+CHANNELS=1
 
 if [ "$CHANNELS" -eq 0 ]; then
     AUDIO_RATE=0
 fi
 
-USE_DEDUP=true  # Set to false to disable frame deduplication
+USE_DEDUP=false  # Set to false to disable frame deduplication
 COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
+DCMV_CONTAINER="chunks" # Options: frames (v6), chunks (v1 chunked)
+CHUNK_DURATION="${CHUNK_DURATION:-0.5}" # Used only for DCMV_CONTAINER=chunks
+FRAME_DIGITS="${FRAME_DIGITS:-5}" # Use 6 for very long videos / chunk workflows
 
 if [ "$USE_STRIDED" = true ]; then
-    WIDTH=640 # Direct strided texture
-    HEIGHT=480
+    WIDTH=$SCALE_WIDTH # Direct strided texture
+    HEIGHT=$SCALE_HEIGHT
 else
     WIDTH=512 # POT texture with padding
     HEIGHT=256
@@ -63,7 +66,8 @@ fi
 # Tool Paths
 PVRTX="/opt/toolchains/dc/kos/utils/pvrtex/pvrtex"
 DCACONV="./dcaconv" # https://github.com/TapamN/dcaconv
-PACKER="./pack_dcmv"
+PACKER_FRAMES="./pack_dcmv"
+PACKER_CHUNKS="./pack_dcmv_chunk"
 
 # Performance Settings
 THREADS=$(nproc) # Auto-detect CPU cores
@@ -82,6 +86,20 @@ INTERMEDIATE_FORMAT="tga" # PNG is the most practical choice
 # Calculated values
 PAD_X=$(( (WIDTH - SCALE_WIDTH) / 2 ))
 PAD_Y=$(( (HEIGHT - SCALE_HEIGHT) / 2 ))
+FRAME_PATTERN=$(printf "frame%%0%dd" "$FRAME_DIGITS")
+
+case "$DCMV_CONTAINER" in
+    frames|v6|frames_v6)
+        DCMV_CONTAINER="frames"
+        ;;
+    chunks|v1|chunks_v1)
+        DCMV_CONTAINER="chunks"
+        ;;
+    *)
+        echo "❌ Unknown DCMV_CONTAINER: $DCMV_CONTAINER (supported: frames, chunks)"
+        exit 1
+        ;;
+esac
 
 # Setup directories
 mkdir -p "$OUTPUT_DIR" "$TEMP_DIR" "$UNIQUE_FRAMES"
@@ -92,6 +110,7 @@ if [ "$USE_STRIDED" = true ]; then
 else
     echo "📐 Using POT texture mode: ${WIDTH}x${HEIGHT} with ${SCALE_WIDTH}x${SCALE_HEIGHT} content (pad: ${PAD_X}x${PAD_Y})"
 fi
+echo "📦 DCMV container: $DCMV_CONTAINER"
 
 # Determine FFmpeg pixel format for intermediate PNGs
 FFMPEG_PIX_FMT=""
@@ -194,7 +213,7 @@ process_rgb565() {
     # Extract frames if not already extracted
     if ! compgen -G "$UNIQUE_FRAMES/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
         echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
-        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
+        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/${FRAME_PATTERN}.$INTERMEDIATE_FORMAT" || exit 1
     else
         echo "✅ Found extracted frames in $TEMP_DIR, skipping ffmpeg extraction."
     fi
@@ -240,7 +259,7 @@ process_rgb565() {
     else
         local frame_idx=0
         for intermediate_file in "$UNIQUE_FRAMES"/frame*.$INTERMEDIATE_FORMAT; do
-            local base=$(printf "frame%05d" "$frame_idx")
+            local base=$(printf "frame%0${FRAME_DIGITS}d" "$frame_idx")
             $PVRTX -i "$intermediate_file" -o "$OUTPUT_DIR/${base}.${EXT}" "${pvrtx_opts[@]}" $PVRTX_QUIET || exit 1
             ((frame_idx++))
         done
@@ -258,7 +277,7 @@ process_yuv422() {
     if ! compgen -G "$TEMP_DIR/frame*.$INTERMEDIATE_FORMAT" >/dev/null && \
        ! compgen -G "$UNIQUE_FRAMES/frame*.$INTERMEDIATE_FORMAT" >/dev/null; then
         echo "🖼️ Extracting frames @ ${FPS}fps, ${WIDTH}x${HEIGHT} as ${FFMPEG_PIX_FMT} PNGs..."
-        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/frame%05d.$INTERMEDIATE_FORMAT" || exit 1
+        ffmpeg "${FFMPEG_OPTS[@]}" "$TEMP_DIR/${FRAME_PATTERN}.$INTERMEDIATE_FORMAT" || exit 1
     else
         echo "✅ Found extracted frames, skipping ffmpeg extraction."
     fi
@@ -270,7 +289,7 @@ process_yuv422() {
         else
             echo "🔍 Running frame deduplication..."
             rm -rf "$UNIQUE_FRAMES"
-            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" .08 || exit 1
+            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" .10 || exit 1
         fi
     else
         if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$UNIQUE_FRAMES/frame*.${INTERMEDIATE_FORMAT}" >/dev/null; then
@@ -307,7 +326,7 @@ process_yuv422() {
     else
         local frame_idx=0
         for intermediate_file in "$UNIQUE_FRAMES"/frame*.$INTERMEDIATE_FORMAT; do
-            local base=$(printf "frame%05d" "$frame_idx")
+            local base=$(printf "frame%0${FRAME_DIGITS}d" "$frame_idx")
             $PVRTX -i "$intermediate_file" -o "$OUTPUT_DIR/${base}.${EXT}" "${pvrtx_opts[@]}" $PVRTX_QUIET || exit 1
             ((frame_idx++))
         done
@@ -330,32 +349,43 @@ esac
 
 echo "✅ Converted frames complete."
 
-if [ "$CHANNELS" -eq 0 ]; then
-    AUDIO_OUT="-"
-    echo "🔇 Audio disabled; skipping extraction and conversion."
-else
-    # Extract and convert audio
-    AUDIO_OUT="$OUTPUT_DIR/audio.dca"
-    if [ "$SKIP_IF_EXISTS" = true ] && [[ -f "$AUDIO_OUT" ]]; then
-        echo "✅ Found existing audio.dca, skipping audio extraction."
+if [ "$DCMV_CONTAINER" = "chunks" ]; then
+    if [ "$CHANNELS" -eq 0 ]; then
+        AUDIO_WAV="-"
+        echo "🔇 Audio disabled; packing video-only chunks."
     else
-        echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
-
-        # Test: Use FFmpeg's adpcm_yamaha with WAV format
-        # ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" \
-        #   -ac "$CHANNELS" -ar "$AUDIO_RATE" \
-        #   -c:a adpcm_yamaha -f wav -y "$AUDIO_OUT"
-
-        # Original method (commented out for comparison)
-        ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
-        "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
-          -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
+        AUDIO_WAV="$TEMP_DIR/temp.wav"
+        if [ "$SKIP_IF_EXISTS" = true ] && [[ -f "$AUDIO_WAV" ]]; then
+            echo "✅ Found existing temp.wav, skipping audio extraction."
+        else
+            echo "🔊 Extracting audio to PCM WAV for chunk-local ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
+            ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$AUDIO_WAV" || exit 1
+        fi
     fi
-fi
 
-echo "📦 Packing into compressed .dcmv format..."
-"$PACKER" "$FINAL_OUTPUT" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$SCALE_WIDTH" "$SCALE_HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
-  "$OUTPUT_DIR/frame%05d.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" || exit 1
+    echo "📦 Packing into chunked v1 .dcmv format..."
+    "$PACKER_CHUNKS" "$FINAL_OUTPUT" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$SCALE_WIDTH" "$SCALE_HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
+      "$OUTPUT_DIR/${FRAME_PATTERN}.${EXT}" "$AUDIO_WAV" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" "$CHUNK_DURATION" || exit 1
+else
+    if [ "$CHANNELS" -eq 0 ]; then
+        AUDIO_OUT="-"
+        echo "🔇 Audio disabled; skipping extraction and conversion."
+    else
+        AUDIO_OUT="$OUTPUT_DIR/audio.dca"
+        if [ "$SKIP_IF_EXISTS" = true ] && [[ -f "$AUDIO_OUT" ]]; then
+            echo "✅ Found existing audio.dca, skipping audio extraction."
+        else
+            echo "🔊 Extracting and converting audio to ADPCM (channels=${CHANNELS}, rate=${AUDIO_RATE})..."
+            ffmpeg -hide_banner -loglevel error -i "$AUDIOINPUT" -ac "$CHANNELS" -ar "$AUDIO_RATE" -c:a pcm_s16le -y "$TEMP_DIR/temp.wav"
+            "$DCACONV" --long --rate "$AUDIO_RATE" -c "$CHANNELS" -f ADPCM \
+              -i "$TEMP_DIR/temp.wav" -o "$AUDIO_OUT" || exit 1
+        fi
+    fi
+
+    echo "📦 Packing into frame-table v6 .dcmv format..."
+    "$PACKER_FRAMES" "$FINAL_OUTPUT" "$FRAME_TYPE" "$WIDTH" "$HEIGHT" "$SCALE_WIDTH" "$SCALE_HEIGHT" "$FPS" "$AUDIO_RATE" "$CHANNELS" \
+      "$OUTPUT_DIR/${FRAME_PATTERN}.${EXT}" "$AUDIO_OUT" "$UNIQUE_FRAMES/frame_durations.txt" "$COMPRESSION_BACKEND" || exit 1
+fi
 
 
 # Clean up intermediate files
