@@ -245,6 +245,8 @@ void dcfmv_submit(dcfmv_t *fmv);
 double dcfmv_tick(dcfmv_t *fmv);
 double dcfmv_wait_until(dcfmv_t *fmv);
 size_t dcfmv_audio_poll(dcfmv_t *fmv);
+void dcfmv_audio_transfer_lock(void);
+void dcfmv_audio_transfer_unlock(void);
 void dcfmv_reset_timing(dcfmv_t *fmv);
 void dcfmv_reset_render_tracking(dcfmv_t *fmv);
 void dcfmv_set_render_resources(dcfmv_t *fmv,

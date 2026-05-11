@@ -1,7 +1,7 @@
 #!/bin/bash
 # Debug/Cleanup Settings
-CLEANUP_TEMP=false
-SKIP_IF_EXISTS=true
+CLEANUP_TEMP="${CLEANUP_TEMP:-false}"
+SKIP_IF_EXISTS="${SKIP_IF_EXISTS:-true}"
 #
 # convert_to_pvr_fmv.sh - Dreamcast FMV Toolchain Driver Script
 # -------------------------------------------------------------
@@ -19,22 +19,22 @@ SKIP_IF_EXISTS=true
 # ==================== USER CONFIGURATION ====================
 
 # Input/Output Settings
-INPUT="input/JURASSIC20REBIRTH20-2020Ultra5D.mp4" # Path to input video file
-# AUDIOINPUT="input/101692_105419_extras.ogg" # Example for audio input
-AUDIOINPUT=$INPUT
-OUTPUT_DIR="output"
-UNIQUE_FRAMES="$OUTPUT_DIR/unique_frames"
-TEMP_DIR="temp_frames"
-FINAL_OUTPUT="./playdcmv/movie.dcmv"
+INPUT="${INPUT:-input/dvd/vts_01_1.m2v}" # Path to input video file
+AUDIOINPUT="${AUDIOINPUT:-input/dvd/vts_01_1.ogg}" # Example for audio input
+# AUDIOINPUT=$INPUT
+OUTPUT_DIR="${OUTPUT_DIR:-output}"
+UNIQUE_FRAMES="${UNIQUE_FRAMES:-$OUTPUT_DIR/unique_frames}"
+TEMP_DIR="${TEMP_DIR:-temp_frames}"
+FINAL_OUTPUT="${FINAL_OUTPUT:-./playdcmv/movie.dcmv}"
 
 # Video Settings
-FPS=24
-FORMAT="yuv422" # Options: rgb565, yuv422
-USE_STRIDED=true # true = 640x480 strided, false = 512x256 POT with padding
+FPS="${FPS:-29.97}"
+FORMAT="${FORMAT:-yuv422}" # Options: rgb565, yuv422
+USE_STRIDED="${USE_STRIDED:-true}" # true = 640x480 strided, false = 512x256 POT with padding
 
 # Texture Dimensions
-SCALE_WIDTH=320 # Content dimensions (always 320x240 for 4:3)
-SCALE_HEIGHT=240
+SCALE_WIDTH="${SCALE_WIDTH:-640}" # Content dimensions (always 320x240 for 4:3)
+SCALE_HEIGHT="${SCALE_HEIGHT:-480}"
 
 # Frame Range Control
 # Set to "all" (or "last") to process the entire video.
@@ -42,16 +42,16 @@ SCALE_HEIGHT=240
 # VIDEO_FRAMES=31438 # Example: Stop at frame 31438 (1-indexed) skip the unused frames in Dragon's Lair
 
 # Audio Settings
-AUDIO_RATE=44100
-CHANNELS=1
+AUDIO_RATE="${AUDIO_RATE:-44100}"
+CHANNELS="${CHANNELS:-2}"
 
 if [ "$CHANNELS" -eq 0 ]; then
     AUDIO_RATE=0
 fi
 
-USE_DEDUP=false  # Set to false to disable frame deduplication
-COMPRESSION_BACKEND="lz4" # Options: lz4, zstd
-DCMV_CONTAINER="chunks" # Options: frames (v6), chunks (v1 chunked)
+USE_DEDUP="${USE_DEDUP:-false}"  # Set to false to disable frame deduplication
+COMPRESSION_BACKEND="${COMPRESSION_BACKEND:-lz4}" # Options: lz4, zstd
+DCMV_CONTAINER="${DCMV_CONTAINER:-frames}" # Options: frames (v6), chunks (v1 chunked)
 CHUNK_DURATION="${CHUNK_DURATION:-0.5}" # Used only for DCMV_CONTAINER=chunks
 FRAME_DIGITS="${FRAME_DIGITS:-5}" # Use 6 for very long videos / chunk workflows
 
@@ -70,16 +70,16 @@ PACKER_FRAMES="./pack_dcmv"
 PACKER_CHUNKS="./pack_dcmv_chunk"
 
 # Performance Settings
-THREADS=$(nproc) # Auto-detect CPU cores
-FFMPEG_LOGLEVEL="warning" # Options: error, warning, info
-PVRTX_QUIET=">/dev/null 2>&1" # Set to "" to see pvrtex output
+THREADS="${THREADS:-$(nproc)}" # Auto-detect CPU cores
+FFMPEG_LOGLEVEL="${FFMPEG_LOGLEVEL:-warning}" # Options: error, warning, info
+PVRTX_QUIET="${PVRTX_QUIET:->/dev/null 2>&1}" # Set to "" to see pvrtex output
 
 # Dithering Settings
-USE_FFMPEG_DITHER=false # Best to let pvrtex handle dithering for final conversion
-PVRTX_DITHER=1 # 0 = no dithering, 1 = enable (recommended for RGB565 from pvrtex)
+USE_FFMPEG_DITHER="${USE_FFMPEG_DITHER:-false}" # Best to let pvrtex handle dithering for final conversion
+PVRTX_DITHER="${PVRTX_DITHER:-1}" # 0 = no dithering, 1 = enable (recommended for RGB565 from pvrtex)
 
 # Intermediate file format
-INTERMEDIATE_FORMAT="tga" # PNG is the most practical choice
+INTERMEDIATE_FORMAT="${INTERMEDIATE_FORMAT:-tga}" # PNG is the most practical choice
 
 # ==================== END CONFIGURATION ====================
 
@@ -289,7 +289,7 @@ process_yuv422() {
         else
             echo "🔍 Running frame deduplication..."
             rm -rf "$UNIQUE_FRAMES"
-            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" .10 || exit 1
+            python3 ./generate_durations.py "$TEMP_DIR" "$UNIQUE_FRAMES" .08 || exit 1
         fi
     else
         if [ "$SKIP_IF_EXISTS" = true ] && compgen -G "$UNIQUE_FRAMES/frame*.${INTERMEDIATE_FORMAT}" >/dev/null; then
