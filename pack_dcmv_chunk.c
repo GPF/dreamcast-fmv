@@ -468,7 +468,7 @@ static int load_durations(const char *path) {
 
     rewind(fp);
 
-    durations = (uint16_t *)malloc(num_unique_frames * sizeof(uint16_t));
+    durations = (uint16_t *)calloc(num_unique_frames, sizeof(uint16_t));
     if (!durations) {
         fprintf(stderr, "Memory allocation failed for durations (%u entries)\n",
                 (unsigned)num_unique_frames);
@@ -771,7 +771,12 @@ int main(int argc, char **argv) {
         max_audio_bytes_per_ch = align_up_size(max_audio_bytes_per_ch, 32);
 
         max_pcm_bytes = align_up_size(max_chunk_samples * (size_t)wav_info.block_align, 32);
-        max_encoded_total = align_up_size(max_audio_bytes_per_ch, 32) * (size_t)channels;
+        {
+            size_t enc_per_ch = align_up_size(max_audio_bytes_per_ch, 32);
+            if (enc_per_ch > SIZE_MAX / (size_t)channels)
+                return 1;
+            max_encoded_total = enc_per_ch * (size_t)channels;
+        }
 
         audio_buffer = (uint8_t *)malloc(max_audio_bytes_per_ch);
         pcm_chunk_buffer = (uint8_t *)malloc(max_pcm_bytes);
